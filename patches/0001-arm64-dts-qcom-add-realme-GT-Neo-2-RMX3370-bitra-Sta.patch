@@ -1,0 +1,480 @@
+From 5c10bc2c08eaa0c521b39f5e5be25e3b8c3f4914 Mon Sep 17 00:00:00 2001
+From: ut-bitra <ut-bitra@localhost>
+Date: Sat, 21 Nov 2026 17:58:04 +0800
+Subject: [PATCH 1/2] arm64: dts: qcom: add realme GT Neo 2 (RMX3370 / bitra)
+ Stage-1 server DTS
+
+---
+ arch/arm64/boot/dts/qcom/Makefile             |   1 +
+ .../boot/dts/qcom/sm8250-realme-bitra.dts     | 447 ++++++++++++++++++
+ 2 files changed, 448 insertions(+)
+ create mode 100644 arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+index 88230c4e0..bfd84661b 100644
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -410,6 +410,7 @@ dtb-$(CONFIG_ARCH_QCOM)	+= sm8150-sony-xperia-kumano-bahamut.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8150-sony-xperia-kumano-griffin.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8250-hdk.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8250-mtp.dtb
++dtb-$(CONFIG_ARCH_QCOM) += sm8250-realme-bitra.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8250-samsung-r8q.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8250-samsung-x1q.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= sm8250-sony-xperia-edo-pdx203.dtb
+diff --git a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+new file mode 100644
+index 000000000..fed43f83b
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+@@ -0,0 +1,447 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * realme GT Neo 2 (RMX3370, "bitra", OPLUS 21619) - Qualcomm SM8250-AC (kona v2.1)
++ *
++ * Stage-1 headless server bring-up DTS:
++ *  - Exact reserved-memory map from stock runtime FDT (live-ours.fdt)
++ *  - Verified TLMM TZ-locked gpio-reserved-ranges (<28 4>, <40 4>)
++ *  - Core RPMh regulators, SPMI PMICs (PM8150/B/L), pshold reset
++ *  - UFS 3.1 storage, USB peripheral (CDC-ECM debug), TSENS, CPUfreq, SMMU
++ */
++
++/dts-v1/;
++
++#include <dt-bindings/arm/qcom,ids.h>
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/regulator/qcom,rpmh-regulator.h>
++#include "sm8250.dtsi"
++#include "pm8150.dtsi"
++#include "pm8150b.dtsi"
++#include "pm8150l.dtsi"
++
++/*
++ * Replace upstream sm8250.dtsi reserved-memory layout with RMX3370 exact
++ * stock runtime FDT map (removed_region is 0xcd00000 = 205 MiB, shifting all
++ * PIL/secure regions up by +0x7a00000 compared to upstream sm8250.dtsi).
++ */
++/delete-node/ &hyp_mem;
++/delete-node/ &xbl_aop_mem;
++/delete-node/ &cmd_db;
++/delete-node/ &smem_mem;
++/delete-node/ &removed_mem;
++/delete-node/ &camera_mem;
++/delete-node/ &wlan_mem;
++/delete-node/ &ipa_fw_mem;
++/delete-node/ &ipa_gsi_mem;
++/delete-node/ &gpu_mem;
++/delete-node/ &npu_mem;
++/delete-node/ &video_mem;
++/delete-node/ &cvp_mem;
++/delete-node/ &cdsp_mem;
++/delete-node/ &slpi_mem;
++/delete-node/ &adsp_mem;
++/delete-node/ &spss_mem;
++/delete-node/ &cdsp_secure_heap;
++/delete-node/ &adsp_rpc_remote_heap_mem;
++
++/ {
++	model = "realme GT Neo 2 (RMX3370)";
++	compatible = "realme,bitra", "qcom,sm8250", "qcom,kona";
++	chassis-type = "handset";
++
++	/* Required by OPLUS/Qualcomm ABL to match this base DTB */
++	qcom,msm-id = <QCOM_ID_SM8250 0x20001>;
++	qcom,board-id = <0x0 0x0>;
++	oplus,dtsi_no = <0x5473>;
++
++	/delete-node/ memory@80000000;
++
++	/* Exact node name /memory as in stock base DTB so ABL populates 12 GiB RAM */
++	memory {
++		device_type = "memory";
++		reg = <0x0 0x0 0x0 0x0>;
++	};
++
++	chosen {
++		bootargs = "";
++	};
++
++	/*
++	 * Disable PSCI deep-sleep CPU/cluster idle states for now (stock bootargs
++	 * also sets lpm_levels.sleep_disabled=1; tracked in docs/tech-debt.md).
++	 */
++	cpus {
++		/delete-node/ idle-states;
++		/delete-node/ domain-idle-states;
++	};
++
++	psci {
++		power-domain-cpu0 { /delete-property/ domain-idle-states; };
++		power-domain-cpu1 { /delete-property/ domain-idle-states; };
++		power-domain-cpu2 { /delete-property/ domain-idle-states; };
++		power-domain-cpu3 { /delete-property/ domain-idle-states; };
++		power-domain-cpu4 { /delete-property/ domain-idle-states; };
++		power-domain-cpu5 { /delete-property/ domain-idle-states; };
++		power-domain-cpu6 { /delete-property/ domain-idle-states; };
++		power-domain-cpu7 { /delete-property/ domain-idle-states; };
++		power-domain-cpu-cluster0 { /delete-property/ domain-idle-states; };
++	};
++
++	vph_pwr: vph-pwr-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vph_pwr";
++		regulator-min-microvolt = <3700000>;
++		regulator-max-microvolt = <3700000>;
++	};
++
++	vreg_s6c_0p88: smpc6-regulator {
++		compatible = "regulator-fixed";
++		regulator-name = "vreg_s6c_0p88";
++		regulator-min-microvolt = <880000>;
++		regulator-max-microvolt = <880000>;
++		regulator-always-on;
++		vin-supply = <&vph_pwr>;
++	};
++
++	reserved-memory {
++		#address-cells = <2>;
++		#size-cells = <2>;
++		ranges;
++
++		hyp_mem: memory@80000000 {
++			reg = <0x0 0x80000000 0x0 0x600000>;
++			no-map;
++		};
++
++		xbl_aop_mem: memory@80700000 {
++			reg = <0x0 0x80700000 0x0 0x160000>;
++			no-map;
++		};
++
++		cmd_db: memory@80860000 {
++			compatible = "qcom,cmd-db";
++			reg = <0x0 0x80860000 0x0 0x20000>;
++			no-map;
++		};
++
++		smem_mem: memory@80900000 {
++			reg = <0x0 0x80900000 0x0 0x200000>;
++			no-map;
++		};
++
++		removed_mem: memory@80b00000 {
++			reg = <0x0 0x80b00000 0x0 0xcd00000>;
++			no-map;
++		};
++
++		camera_mem: memory@8dc00000 {
++			reg = <0x0 0x8dc00000 0x0 0x500000>;
++			no-map;
++		};
++
++		wlan_mem: memory@8e100000 {
++			reg = <0x0 0x8e100000 0x0 0x100000>;
++			no-map;
++		};
++
++		ipa_fw_mem: memory@8e200000 {
++			reg = <0x0 0x8e200000 0x0 0x10000>;
++			no-map;
++		};
++
++		ipa_gsi_mem: memory@8e210000 {
++			reg = <0x0 0x8e210000 0x0 0xa000>;
++			no-map;
++		};
++
++		gpu_mem: memory@8e21a000 {
++			reg = <0x0 0x8e21a000 0x0 0x2000>;
++			no-map;
++		};
++
++		npu_mem: memory@8e300000 {
++			reg = <0x0 0x8e300000 0x0 0x500000>;
++			no-map;
++		};
++
++		video_mem: memory@8e800000 {
++			reg = <0x0 0x8e800000 0x0 0x500000>;
++			no-map;
++		};
++
++		cvp_mem: memory@8ed00000 {
++			reg = <0x0 0x8ed00000 0x0 0x500000>;
++			no-map;
++		};
++
++		cdsp_mem: memory@8f200000 {
++			reg = <0x0 0x8f200000 0x0 0x1400000>;
++			no-map;
++		};
++
++		slpi_mem: memory@90600000 {
++			reg = <0x0 0x90600000 0x0 0x1500000>;
++			no-map;
++		};
++
++		adsp_mem: memory@91b00000 {
++			reg = <0x0 0x91b00000 0x0 0x2500000>;
++			no-map;
++		};
++
++		spss_mem: memory@94000000 {
++			reg = <0x0 0x94000000 0x0 0x100000>;
++			no-map;
++		};
++
++		cdsp_secure_heap: memory@94100000 {
++			reg = <0x0 0x94100000 0x0 0x4600000>;
++			no-map;
++		};
++
++		cont_splash_mem: memory@9c000000 {
++			reg = <0x0 0x9c000000 0x0 0x2300000>;
++			no-map;
++		};
++
++		dfps_data_mem: memory@9e300000 {
++			reg = <0x0 0x9e300000 0x0 0x100000>;
++			no-map;
++		};
++
++		kboot_logmem: memory@9fe00000 {
++			reg = <0x0 0x9fe00000 0x0 0x200000>;
++			no-map;
++		};
++
++		reserved_high@ffc00000 {
++			reg = <0x0 0xffc00000 0x0 0x20000>;
++			no-map;
++		};
++
++		ramoops@b0000000 {
++			compatible = "ramoops";
++			reg = <0x0 0xb0000000 0x0 0x3ff000>;
++			record-size = <0x40000>;
++			console-size = <0x40000>;
++			ftrace-size = <0x40000>;
++			pmsg-size = <0x200000>;
++			ecc-size = <0x0>;
++		};
++
++		adsp_rpc_remote_heap_mem: adsp-rpc-remote-heap {
++			compatible = "shared-dma-pool";
++			alloc-ranges = <0x0 0x80000000 0x0 0x80000000>;
++			reusable;
++			alignment = <0x0 0x400000>;
++			size = <0x0 0x800000>;
++		};
++	};
++};
++
++&cpu0 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
++&cpu1 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
++&cpu2 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
++&cpu3 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
++&cpu4 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
++&cpu5 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
++&cpu6 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
++&cpu7 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
++
++&apps_rsc {
++	/delete-property/ power-domains;
++
++	regulators-0 {
++		compatible = "qcom,pm8150-rpmh-regulators";
++		qcom,pmic-id = "a";
++
++		vdd-s1-supply = <&vph_pwr>;
++		vdd-s2-supply = <&vph_pwr>;
++		vdd-s3-supply = <&vph_pwr>;
++		vdd-s4-supply = <&vph_pwr>;
++		vdd-s5-supply = <&vph_pwr>;
++		vdd-s6-supply = <&vph_pwr>;
++		vdd-s7-supply = <&vph_pwr>;
++		vdd-s8-supply = <&vph_pwr>;
++		vdd-s9-supply = <&vph_pwr>;
++		vdd-s10-supply = <&vph_pwr>;
++		vdd-l1-l8-l11-supply = <&vreg_s6c_0p88>;
++		vdd-l2-l10-supply = <&vreg_bob>;
++		vdd-l3-l4-l5-l18-supply = <&vreg_s6a_0p95>;
++		vdd-l6-l9-supply = <&vreg_s8c_1p3>;
++		vdd-l7-l12-l14-l15-supply = <&vreg_s5a_1p9>;
++		vdd-l13-l16-l17-supply = <&vreg_bob>;
++
++		vreg_s4a_1p8: smps4 {
++			regulator-name = "vreg_s4a_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1920000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-allow-set-load;
++			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_s5a_1p9: smps5 {
++			regulator-name = "vreg_s5a_1p9";
++			regulator-min-microvolt = <1904000>;
++			regulator-max-microvolt = <2000000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_s6a_0p95: smps6 {
++			regulator-name = "vreg_s6a_0p95";
++			regulator-min-microvolt = <920000>;
++			regulator-max-microvolt = <1128000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l2a_3p1: ldo2 {
++			regulator-name = "vreg_l2a_3p1";
++			regulator-min-microvolt = <3072000>;
++			regulator-max-microvolt = <3072000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l5a_0p88: ldo5 {
++			regulator-name = "vreg_l5a_0p88";
++			regulator-min-microvolt = <880000>;
++			regulator-max-microvolt = <880000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l6a_1p2: ldo6 {
++			regulator-name = "vreg_l6a_1p2";
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1200000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l9a_1p2: ldo9 {
++			regulator-name = "vreg_l9a_1p2";
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1200000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l12a_1p8: ldo12 {
++			regulator-name = "vreg_l12a_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l17a_3p0: ldo17 {
++			regulator-name = "vreg_l17a_3p0";
++			regulator-min-microvolt = <2504000>;
++			regulator-max-microvolt = <3008000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-allow-set-load;
++			regulator-allowed-modes = <RPMH_REGULATOR_MODE_LPM RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l18a_0p9: ldo18 {
++			regulator-name = "vreg_l18a_0p9";
++			regulator-min-microvolt = <912000>;
++			regulator-max-microvolt = <912000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++	};
++
++	regulators-1 {
++		compatible = "qcom,pm8150l-rpmh-regulators";
++		qcom,pmic-id = "c";
++
++		vdd-s1-supply = <&vph_pwr>;
++		vdd-s2-supply = <&vph_pwr>;
++		vdd-s3-supply = <&vph_pwr>;
++		vdd-s4-supply = <&vph_pwr>;
++		vdd-s5-supply = <&vph_pwr>;
++		vdd-s6-supply = <&vph_pwr>;
++		vdd-s7-supply = <&vph_pwr>;
++		vdd-s8-supply = <&vph_pwr>;
++		vdd-l1-l8-supply = <&vreg_s4a_1p8>;
++		vdd-l2-l3-supply = <&vreg_s8c_1p3>;
++		vdd-l4-l5-l6-supply = <&vreg_bob>;
++		vdd-l7-l11-supply = <&vreg_bob>;
++		vdd-l9-l10-supply = <&vreg_bob>;
++		vdd-bob-supply = <&vph_pwr>;
++
++		vreg_s8c_1p3: smps8 {
++			regulator-name = "vreg_s8c_1p3";
++			regulator-min-microvolt = <1352000>;
++			regulator-max-microvolt = <1352000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_bob: bob {
++			regulator-name = "vreg_bob";
++			regulator-min-microvolt = <3008000>;
++			regulator-max-microvolt = <4000000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_AUTO>;
++		};
++	};
++};
++
++&pon {
++	mode-bootloader = <0x2>;
++	mode-recovery = <0x1>;
++};
++
++&pon_pwrkey {
++	status = "okay";
++};
++
++&pon_resin {
++	linux,code = <KEY_VOLUMEDOWN>;
++	status = "okay";
++};
++
++&soc {
++	restart@c264000 {
++		compatible = "qcom,pshold";
++		reg = <0x0 0x0c264000 0x0 0x4>;
++	};
++};
++
++/* TZ-locked QUP SE0 (28..31) & SE14 (40..43) — reading triggers XPU PS_HOLD reset */
++&tlmm {
++	gpio-reserved-ranges = <28 4>, <40 4>;
++};
++
++/* Stage-1 fixed peripheral USB HS mode for CDC-ECM debug channel */
++&usb_1 {
++	qcom,select-utmi-as-pipe-clk;
++	status = "okay";
++};
++
++&usb_1_dwc3 {
++	dr_mode = "peripheral";
++	maximum-speed = "high-speed";
++	phys = <&usb_1_hsphy>;
++	phy-names = "usb2-phy";
++};
++
++&usb_1_hsphy {
++	vdda-pll-supply = <&vreg_l5a_0p88>;
++	vdda18-supply = <&vreg_l12a_1p8>;
++	vdda33-supply = <&vreg_l2a_3p1>;
++	status = "okay";
++};
++
++/* UFS 3.1 storage (kept read-only in RAM initrd) */
++&ufs_mem_hc {
++	vcc-supply = <&vreg_l17a_3p0>;
++	vcc-max-microamp = <800000>;
++	vccq-supply = <&vreg_l6a_1p2>;
++	vccq-max-microamp = <800000>;
++	vccq2-supply = <&vreg_s4a_1p8>;
++	vccq2-max-microamp = <800000>;
++	status = "okay";
++};
++
++&ufs_mem_phy {
++	vdda-phy-supply = <&vreg_l5a_0p88>;
++	vdda-pll-supply = <&vreg_l9a_1p2>;
++	status = "okay";
++};
+-- 
+2.43.0
+

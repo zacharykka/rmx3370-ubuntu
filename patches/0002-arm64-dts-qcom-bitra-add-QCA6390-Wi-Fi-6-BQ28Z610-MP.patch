@@ -1,0 +1,623 @@
+From 5f3199e3ae24077ecebfeac76b81f6f9765be58f Mon Sep 17 00:00:00 2001
+From: ut-bitra <ut-bitra@localhost>
+Date: Sat, 21 Nov 2026 19:49:24 +0800
+Subject: [PATCH 2/2] arm64: dts: qcom: bitra: add QCA6390 Wi-Fi 6, BQ28Z610,
+ MP2650 charger, and OLED power-off rails
+
+- Enable PCIe0 + qca6390-pmu (GPIO20/21) for QCA6390 Wi-Fi 6 (ath11k_pci)
+- Enable QUPv3 wrap 2 I2C16 (0x888000) for TI BQ28Z610 2S fuel gauge @ 0x55
+- Enable QUPv3 wrap 0 I2C5 (0x994000) and add clean mainline MPS MP2650 2S
+  charger driver (drivers/power/supply/mp2650_charger.c) with standard
+  charge_behaviour (auto, inhibit-charge bypass, force-discharge HIZ)
+- Declare boot-on OLED/touchscreen LDOs (vreg_l13a_3p0, vreg_l14a_1p8,
+  vreg_l2c_1p15) without always-on so regulator_late_cleanup powers off the
+  unused OLED panel on headless server boots
+---
+ .../boot/dts/qcom/sm8250-realme-bitra.dts     | 163 ++++++++
+ drivers/power/supply/Kconfig                  |   8 +
+ drivers/power/supply/Makefile                 |   1 +
+ drivers/power/supply/mp2650_charger.c         | 369 ++++++++++++++++++
+ 4 files changed, 541 insertions(+)
+ create mode 100644 drivers/power/supply/mp2650_charger.c
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+index fed43f83b..03bf9b7b9 100644
+--- a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
++++ b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+@@ -95,6 +95,68 @@ vph_pwr: vph-pwr-regulator {
+ 		regulator-max-microvolt = <3700000>;
+ 	};
+ 
++
++	qca6390-pmu {
++		compatible = "qcom,qca6390-pmu";
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&bt_en_state>, <&wlan_en_state>;
++
++		vddaon-supply = <&vreg_s6a_0p95>;
++		vddpmu-supply = <&vreg_s6a_0p95>;
++		vddrfa0p95-supply = <&vreg_s6a_0p95>;
++		vddrfa1p3-supply = <&vreg_s8c_1p3>;
++		vddrfa1p9-supply = <&vreg_s5a_1p9>;
++		vddpcie1p3-supply = <&vreg_s8c_1p3>;
++		vddpcie1p9-supply = <&vreg_s5a_1p9>;
++		vddio-supply = <&vreg_s4a_1p8>;
++
++		wlan-enable-gpios = <&tlmm 20 GPIO_ACTIVE_HIGH>;
++		bt-enable-gpios = <&tlmm 21 GPIO_ACTIVE_HIGH>;
++
++		regulators {
++			vreg_pmu_rfa_cmn: ldo0 {
++				regulator-name = "vreg_pmu_rfa_cmn";
++			};
++
++			vreg_pmu_aon_0p59: ldo1 {
++				regulator-name = "vreg_pmu_aon_0p59";
++			};
++
++			vreg_pmu_wlcx_0p8: ldo2 {
++				regulator-name = "vreg_pmu_wlcx_0p8";
++			};
++
++			vreg_pmu_wlmx_0p85: ldo3 {
++				regulator-name = "vreg_pmu_wlmx_0p85";
++			};
++
++			vreg_pmu_btcmx_0p85: ldo4 {
++				regulator-name = "vreg_pmu_btcmx_0p85";
++			};
++
++			vreg_pmu_rfa_0p8: ldo5 {
++				regulator-name = "vreg_pmu_rfa_0p8";
++			};
++
++			vreg_pmu_rfa_1p2: ldo6 {
++				regulator-name = "vreg_pmu_rfa_1p2";
++			};
++
++			vreg_pmu_rfa_1p7: ldo7 {
++				regulator-name = "vreg_pmu_rfa_1p7";
++			};
++
++			vreg_pmu_pcie_0p9: ldo8 {
++				regulator-name = "vreg_pmu_pcie_0p9";
++			};
++
++			vreg_pmu_pcie_1p8: ldo9 {
++				regulator-name = "vreg_pmu_pcie_1p8";
++			};
++		};
++	};
++
+ 	vreg_s6c_0p88: smpc6-regulator {
+ 		compatible = "regulator-fixed";
+ 		regulator-name = "vreg_s6c_0p88";
+@@ -331,6 +393,22 @@ vreg_l12a_1p8: ldo12 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
++		vreg_l13a_3p0: ldo13 {
++			regulator-name = "vreg_l13a_3p0";
++			regulator-boot-on;
++			regulator-min-microvolt = <3008000>;
++			regulator-max-microvolt = <3008000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l14a_1p8: ldo14 {
++			regulator-name = "vreg_l14a_1p8";
++			regulator-boot-on;
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
+ 		vreg_l17a_3p0: ldo17 {
+ 			regulator-name = "vreg_l17a_3p0";
+ 			regulator-min-microvolt = <2504000>;
+@@ -374,6 +452,14 @@ vreg_s8c_1p3: smps8 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
++		vreg_l2c_1p15: ldo2 {
++			regulator-name = "vreg_l2c_1p15";
++			regulator-boot-on;
++			regulator-min-microvolt = <1152000>;
++			regulator-max-microvolt = <1152000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
+ 		vreg_bob: bob {
+ 			regulator-name = "vreg_bob";
+ 			regulator-min-microvolt = <3008000>;
+@@ -445,3 +531,80 @@ &ufs_mem_phy {
+ 	vdda-pll-supply = <&vreg_l9a_1p2>;
+ 	status = "okay";
+ };
++
++/* QCA6390 Wi-Fi 6 / BT power-sequencing pinctrl */
++&tlmm {
++	wlan_en_state: wlan-default-state {
++		pins = "gpio20";
++		function = "gpio";
++		drive-strength = <16>;
++		output-low;
++		bias-pull-up;
++	};
++
++	bt_en_state: bt-default-state {
++		pins = "gpio21";
++		function = "gpio";
++		drive-strength = <16>;
++		output-low;
++		bias-pull-up;
++	};
++};
++
++/* QCA6390 Wi-Fi 6 over PCIe0 */
++&pcie0 {
++	status = "okay";
++};
++
++&pcie0_phy {
++	vdda-phy-supply = <&vreg_l5a_0p88>;
++	vdda-pll-supply = <&vreg_l9a_1p2>;
++	status = "okay";
++};
++
++&pcieport0 {
++	wifi@0 {
++		compatible = "pci17cb,1101";
++		reg = <0x10000 0x0 0x0 0x0 0x0>;
++
++		vddrfacmn-supply = <&vreg_pmu_rfa_cmn>;
++		vddaon-supply = <&vreg_pmu_aon_0p59>;
++		vddwlcx-supply = <&vreg_pmu_wlcx_0p8>;
++		vddwlmx-supply = <&vreg_pmu_wlmx_0p85>;
++		vddrfa0p8-supply = <&vreg_pmu_rfa_0p8>;
++		vddrfa1p2-supply = <&vreg_pmu_rfa_1p2>;
++		vddrfa1p7-supply = <&vreg_pmu_rfa_1p7>;
++		vddpcie0p9-supply = <&vreg_pmu_pcie_0p9>;
++		vddpcie1p8-supply = <&vreg_pmu_pcie_1p8>;
++	};
++};
++
++/* QUPv3 wrap 2 -> I2C16 (0x888000): TI BQ28Z610 2S fuel gauge @ 0x55 */
++&qupv3_id_2 {
++	status = "okay";
++};
++
++&i2c16 {
++	clock-frequency = <100000>;
++	status = "okay";
++
++	battery@55 {
++		compatible = "ti,bq28z610";
++		reg = <0x55>;
++	};
++};
++
++/* QUPv3 wrap 0 -> I2C5 (0x994000): MPS MP2650 2S charger @ 0x5c */
++&qupv3_id_0 {
++	status = "okay";
++};
++
++&i2c5 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	charger@5c {
++		compatible = "mps,mp2650";
++		reg = <0x5c>;
++	};
++};
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index ee7dc5f26..9e942c4f3 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -695,6 +695,14 @@ config CHARGER_MAX8998
+ 	  Say Y to enable support for the battery charger control sysfs and
+ 	  platform data of MAX8998/LP3974 PMICs.
+ 
++config CHARGER_MP2650
++	tristate "Monolithic Power Systems MP2650 2S Battery Charger"
++	depends on I2C
++	select REGMAP_I2C
++	help
++	  Say Y or M here to enable support for the Monolithic Power Systems
++	  MP2650 2-cell (2S) buck-boost battery charger.
++
+ config CHARGER_MP2629
+ 	tristate "Monolithic power system MP2629 Battery charger"
+ 	depends on MFD_MP2629
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index f3c0d1006..c8d6dee94 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -92,6 +92,7 @@ obj-$(CONFIG_CHARGER_MAX8971)	+= max8971_charger.o
+ obj-$(CONFIG_CHARGER_MAX8997)	+= max8997_charger.o
+ obj-$(CONFIG_CHARGER_MAX8998)	+= max8998_charger.o
+ obj-$(CONFIG_CHARGER_MP2629)	+= mp2629_charger.o
++obj-$(CONFIG_CHARGER_MP2650)	+= mp2650_charger.o
+ obj-$(CONFIG_CHARGER_MT6360)	+= mt6360_charger.o
+ obj-$(CONFIG_CHARGER_MT6370)	+= mt6370-charger.o
+ obj-$(CONFIG_CHARGER_QCOM_SMBB)	+= qcom_smbb.o
+diff --git a/drivers/power/supply/mp2650_charger.c b/drivers/power/supply/mp2650_charger.c
+new file mode 100644
+index 000000000..cc7456a77
+--- /dev/null
++++ b/drivers/power/supply/mp2650_charger.c
+@@ -0,0 +1,369 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MPS MP2650 2-cell (2S) buck-boost battery charger driver.
++ *
++ * Supports standard power_supply telemetry (VIN/IIN ADCs, status, fault health,
++ * programmable input current / charge current / float voltage) and standard
++ * charge_behaviour (auto, inhibit-charge bypass, force-discharge HIZ) for 24/7
++ * anti-swelling charge control.
++ */
++
++#include <linux/bits.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++
++#define MP2650_REG_IIN_LIM		0x00
++#define MP2650_IIN_LIM_MASK		GENMASK(6, 0)
++#define MP2650_IIN_LIM_STEP_UA		50000
++
++#define MP2650_REG_ICHG			0x02
++#define MP2650_ICHG_STEP_UA		50000
++
++#define MP2650_REG_VFLOAT		0x04
++#define MP2650_VFLOAT_MASK		GENMASK(6, 1)
++#define MP2650_VFLOAT_SHIFT		1
++#define MP2650_VFLOAT_BASE_UV		3712500
++#define MP2650_VFLOAT_STEP_UV		12500
++
++#define MP2650_REG_CTRL0		0x08
++#define MP2650_CTRL0_LEARN_EN		BIT(3) /* HIZ / force-discharge */
++#define MP2650_CTRL0_CHG_EN		BIT(4) /* Charge enable (0 = bypass) */
++#define MP2650_CTRL0_OTG_EN		BIT(5)
++#define MP2650_CTRL0_WTD_RST		BIT(6)
++
++#define MP2650_REG_CTRL1		0x09
++#define MP2650_CTRL1_WTD_MASK		GENMASK(5, 4)
++
++#define MP2650_REG_STATUS		0x13
++#define MP2650_STAT_VIN_PG		BIT(1)
++#define MP2650_STAT_CHG_MASK		GENMASK(3, 2)
++#define MP2650_STAT_CHG_NONE		(0 << 2)
++#define MP2650_STAT_CHG_PRE		(1 << 2)
++#define MP2650_STAT_CHG_FAST		(2 << 2)
++#define MP2650_STAT_CHG_DONE		(3 << 2)
++
++#define MP2650_REG_FAULT		0x14
++#define MP2650_FAULT_NTC_MASK		GENMASK(2, 0)
++#define MP2650_FAULT_BAT_OVP		BIT(3)
++#define MP2650_FAULT_CHG_MASK		GENMASK(5, 4)
++#define MP2650_FAULT_CHG_INPUT		(1 << 4)
++#define MP2650_FAULT_CHG_THERM		(2 << 4)
++#define MP2650_FAULT_CHG_TIMER		(3 << 4)
++
++#define MP2650_REG_REV			0x15
++
++#define MP2650_REG_ADC_VBAT_L		0x16
++#define MP2650_REG_ADC_VSYS_L		0x18
++#define MP2650_REG_ADC_ICHG_L		0x1a
++#define MP2650_REG_ADC_VIN_L		0x1c
++#define MP2650_REG_ADC_IIN_L		0x1e
++
++#define MP2650_MAX_REG			0x29
++
++struct mp2650_charger {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct gpio_desc *otg_en_gpio;
++};
++
++static const struct regmap_config mp2650_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = MP2650_MAX_REG,
++};
++
++static int mp2650_read_adc10(struct mp2650_charger *chg, u8 reg_lo, u32 *raw)
++{
++	u8 buf[2];
++	int ret;
++
++	ret = regmap_bulk_read(chg->regmap, reg_lo, buf, 2);
++	if (ret)
++		return ret;
++
++	*raw = (((u32)buf[1] << 8) | buf[0]) >> 6;
++	return 0;
++}
++
++static int mp2650_get_property(struct power_supply *psy,
++			       enum power_supply_property psp,
++			       union power_supply_propval *val)
++{
++	struct mp2650_charger *chg = power_supply_get_drvdata(psy);
++	unsigned int reg;
++	u32 raw;
++	int ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		ret = mp2650_read_adc10(chg, MP2650_REG_ADC_VIN_L, &raw);
++		if (ret)
++			return ret;
++		/* VIN ADC step = 25 mV; consider USB online if VIN >= 3.5 V */
++		val->intval = (raw * 25 >= 3500) ? 1 : 0;
++		return 0;
++
++	case POWER_SUPPLY_PROP_STATUS:
++		ret = regmap_read(chg->regmap, MP2650_REG_STATUS, &reg);
++		if (ret)
++			return ret;
++		switch (reg & MP2650_STAT_CHG_MASK) {
++		case MP2650_STAT_CHG_PRE:
++		case MP2650_STAT_CHG_FAST:
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++			break;
++		case MP2650_STAT_CHG_DONE:
++			val->intval = POWER_SUPPLY_STATUS_FULL;
++			break;
++		default:
++			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
++			break;
++		}
++		return 0;
++
++	case POWER_SUPPLY_PROP_HEALTH:
++		ret = regmap_read(chg->regmap, MP2650_REG_FAULT, &reg);
++		if (ret)
++			return ret;
++		if (reg & MP2650_FAULT_BAT_OVP)
++			val->intval = POWER_SUPPLY_HEALTH_OVERVOLTAGE;
++		else if ((reg & MP2650_FAULT_CHG_MASK) == MP2650_FAULT_CHG_THERM)
++			val->intval = POWER_SUPPLY_HEALTH_OVERHEAT;
++		else if ((reg & MP2650_FAULT_CHG_MASK) == MP2650_FAULT_CHG_TIMER)
++			val->intval = POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE;
++		else if ((reg & MP2650_FAULT_CHG_MASK) == MP2650_FAULT_CHG_INPUT)
++			val->intval = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
++		else
++			val->intval = POWER_SUPPLY_HEALTH_GOOD;
++		return 0;
++
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		ret = mp2650_read_adc10(chg, MP2650_REG_ADC_VIN_L, &raw);
++		if (ret)
++			return ret;
++		val->intval = raw * 25000; /* 25 mV/LSB -> uV */
++		return 0;
++
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		ret = mp2650_read_adc10(chg, MP2650_REG_ADC_IIN_L, &raw);
++		if (ret)
++			return ret;
++		val->intval = raw * 6250; /* 6.25 mA/LSB -> uA */
++		return 0;
++
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		ret = regmap_read(chg->regmap, MP2650_REG_IIN_LIM, &reg);
++		if (ret)
++			return ret;
++		val->intval = (reg & MP2650_IIN_LIM_MASK) * MP2650_IIN_LIM_STEP_UA;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		ret = regmap_read(chg->regmap, MP2650_REG_ICHG, &reg);
++		if (ret)
++			return ret;
++		val->intval = reg * MP2650_ICHG_STEP_UA;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		ret = regmap_read(chg->regmap, MP2650_REG_VFLOAT, &reg);
++		if (ret)
++			return ret;
++		val->intval = MP2650_VFLOAT_BASE_UV +
++			      ((reg & MP2650_VFLOAT_MASK) >> MP2650_VFLOAT_SHIFT) *
++			      MP2650_VFLOAT_STEP_UV;
++		return 0;
++
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		ret = regmap_read(chg->regmap, MP2650_REG_CTRL0, &reg);
++		if (ret)
++			return ret;
++		if (reg & MP2650_CTRL0_LEARN_EN)
++			val->intval = POWER_SUPPLY_CHARGE_BEHAVIOUR_FORCE_DISCHARGE;
++		else if (!(reg & MP2650_CTRL0_CHG_EN))
++			val->intval = POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE;
++		else
++			val->intval = POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
++		return 0;
++
++	case POWER_SUPPLY_PROP_MANUFACTURER:
++		val->strval = "Monolithic Power Systems";
++		return 0;
++
++	case POWER_SUPPLY_PROP_MODEL_NAME:
++		val->strval = "MP2650";
++		return 0;
++
++	default:
++		return -EINVAL;
++	}
++}
++
++static int mp2650_set_property(struct power_supply *psy,
++			       enum power_supply_property psp,
++			       const union power_supply_propval *val)
++{
++	struct mp2650_charger *chg = power_supply_get_drvdata(psy);
++	int clamped, steps;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		clamped = clamp(val->intval, 500000, 3000000);
++		steps = clamped / MP2650_IIN_LIM_STEP_UA;
++		return regmap_update_bits(chg->regmap, MP2650_REG_IIN_LIM,
++					  MP2650_IIN_LIM_MASK, steps);
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		clamped = clamp(val->intval, 100000, 3000000);
++		steps = clamped / MP2650_ICHG_STEP_UA;
++		return regmap_write(chg->regmap, MP2650_REG_ICHG, steps);
++
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		/* Per-cell float voltage for 2S pack (clamped to safe 3.80..4.40V) */
++		clamped = clamp(val->intval, 3800000, 4400000);
++		steps = (clamped - MP2650_VFLOAT_BASE_UV) / MP2650_VFLOAT_STEP_UV;
++		return regmap_update_bits(chg->regmap, MP2650_REG_VFLOAT,
++					  MP2650_VFLOAT_MASK,
++					  steps << MP2650_VFLOAT_SHIFT);
++
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		switch (val->intval) {
++		case POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO:
++			return regmap_update_bits(chg->regmap, MP2650_REG_CTRL0,
++						  MP2650_CTRL0_CHG_EN | MP2650_CTRL0_LEARN_EN,
++						  MP2650_CTRL0_CHG_EN);
++		case POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE:
++			return regmap_update_bits(chg->regmap, MP2650_REG_CTRL0,
++						  MP2650_CTRL0_CHG_EN | MP2650_CTRL0_LEARN_EN,
++						  0);
++		case POWER_SUPPLY_CHARGE_BEHAVIOUR_FORCE_DISCHARGE:
++			return regmap_update_bits(chg->regmap, MP2650_REG_CTRL0,
++						  MP2650_CTRL0_CHG_EN | MP2650_CTRL0_LEARN_EN,
++						  MP2650_CTRL0_LEARN_EN);
++		default:
++			return -EINVAL;
++		}
++
++	default:
++		return -EINVAL;
++	}
++}
++
++static int mp2650_property_is_writeable(struct power_supply *psy,
++					enum power_supply_property psp)
++{
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		return 1;
++	default:
++		return 0;
++	}
++}
++
++static enum power_supply_property mp2650_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_HEALTH,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
++	POWER_SUPPLY_PROP_MANUFACTURER,
++	POWER_SUPPLY_PROP_MODEL_NAME,
++};
++
++static const struct power_supply_desc mp2650_psy_desc = {
++	.name = "mp2650-charger",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.properties = mp2650_props,
++	.num_properties = ARRAY_SIZE(mp2650_props),
++	.get_property = mp2650_get_property,
++	.set_property = mp2650_set_property,
++	.property_is_writeable = mp2650_property_is_writeable,
++	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_FORCE_DISCHARGE),
++};
++
++static int mp2650_probe(struct i2c_client *client)
++{
++	struct power_supply_config psy_cfg = {};
++	struct mp2650_charger *chg;
++	unsigned int rev;
++	int ret;
++
++	chg = devm_kzalloc(&client->dev, sizeof(*chg), GFP_KERNEL);
++	if (!chg)
++		return -ENOMEM;
++
++	chg->dev = &client->dev;
++	i2c_set_clientdata(client, chg);
++
++	chg->regmap = devm_regmap_init_i2c(client, &mp2650_regmap_config);
++	if (IS_ERR(chg->regmap))
++		return dev_err_probe(chg->dev, PTR_ERR(chg->regmap),
++				     "failed to init regmap\n");
++
++	ret = regmap_read(chg->regmap, MP2650_REG_REV, &rev);
++	if (ret)
++		return dev_err_probe(chg->dev, ret, "failed to read revision\n");
++
++	/* Disable 40s HW watchdog so 24/7 charge-limit settings persist */
++	ret = regmap_update_bits(chg->regmap, MP2650_REG_CTRL1,
++				 MP2650_CTRL1_WTD_MASK, 0);
++	if (ret)
++		dev_warn(chg->dev, "failed to disable watchdog: %d\n", ret);
++
++	chg->otg_en_gpio = devm_gpiod_get_optional(chg->dev, "otg-enable",
++						   GPIOD_OUT_LOW);
++	if (IS_ERR(chg->otg_en_gpio))
++		return dev_err_probe(chg->dev, PTR_ERR(chg->otg_en_gpio),
++				     "failed to get otg-enable gpio\n");
++
++	psy_cfg.drv_data = chg;
++	psy_cfg.fwnode = dev_fwnode(chg->dev);
++	chg->psy = devm_power_supply_register(chg->dev, &mp2650_psy_desc, &psy_cfg);
++	if (IS_ERR(chg->psy))
++		return dev_err_probe(chg->dev, PTR_ERR(chg->psy),
++				     "failed to register power_supply\n");
++
++	dev_info(chg->dev, "MPS MP2650 2S charger probed (rev=0x%02x)\n", rev);
++	return 0;
++}
++
++static const struct of_device_id mp2650_of_match[] = {
++	{ .compatible = "mps,mp2650" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mp2650_of_match);
++
++static const struct i2c_device_id mp2650_id[] = {
++	{ "mp2650" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, mp2650_id);
++
++static struct i2c_driver mp2650_driver = {
++	.driver = {
++		.name = "mp2650-charger",
++		.of_match_table = mp2650_of_match,
++	},
++	.probe = mp2650_probe,
++	.id_table = mp2650_id,
++};
++module_i2c_driver(mp2650_driver);
++
++MODULE_DESCRIPTION("MPS MP2650 2S Battery Charger Driver");
++MODULE_LICENSE("GPL");
+-- 
+2.43.0
+

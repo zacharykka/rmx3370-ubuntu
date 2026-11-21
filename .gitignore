@@ -1,0 +1,26 @@
+# Local build outputs and device-specific evidence
+/out/
+/build/
+/sources/
+/private/
+/evidence/
+*.img
+*.img.gz
+*.bin
+*.elf
+*.dtb
+*.dtbo
+*.cpio
+*.cpio.gz
+*.ramdisk
+*.log
+*.pem
+*.key
+id_*
+
+# Editor and host-local files
+.DS_Store
+*.swp
+
+# Local upstream Linux checkout (apply patches/*.patch)
+/kernel/
