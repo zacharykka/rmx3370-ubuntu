@@ -9,11 +9,11 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 - **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra4`).
 - **[Technical Debt Tracker](docs/tech-debt.md)** — Known temporary workarounds and exit criteria.
 
-## Verified Working Hardware (`7.4.0-rc3-bitra4`, Flashed & Cold-Boot Verified)
+## Verified Working Hardware (`7.4.0-rc3-bitra5`, Flashed & Cold-Boot Verified)
 
 | Subsystem | Hardware / Driver | Status | Notes |
 |---|---|---|---|
-| SoC / CPU / CPUfreq | SM8250-AC 8x Kryo 485 (`qcom-cpufreq-hw`) | **Working** | 3 clusters (`0.30–1.80`, `0.71–2.42`, `0.84–2.84 GHz`), 25 thermal zones, zero boot-crutch cmdline flags |
+| SoC / CPU / CPUfreq | SM8250-AC 8x Kryo 485 (`qcom-cpufreq-hw`) | **Working** | 3 clusters (`0.30–1.80`, `0.71–2.42`, `0.84–3.19 GHz`), 25 thermal zones, zero boot-crutch cmdline flags |
 | RAM & Swap | 12 GiB LPDDR5 + `zram0` (LZ4) | **Working** | Exact 22-region RMX3370 `reserved-memory` map |
 | Storage | Samsung UFS 3.1 (`1d84000.ufshc`) | **Working** | All 6 LUNs (`sda`–`sdf`); `/dev/sda11` (`222 GiB` ext4 `LABEL=ubuntu-root`), GPT untouched |
 | USB Management Net | `a600000.usb` CDC-ECM (`usb0`) | **Working** | Static `192.168.2.15/24` + `dnsmasq` DHCP without default-route hijack; native on macOS/Linux |
@@ -22,7 +22,7 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | 2S Charger & Anti-Swelling | `MPS MP2650` (`mp2650_charger`, `i2c5@0x5c`) | **Working** | Upstream `charge_behaviour` (`auto`, `inhibit-charge` USB bypass, `force-discharge` HIZ) + 60s systemd timer (`55%–75%` band) |
 | OLED Screen-Off | `vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15` | **Working** | RPMh `regulator_late_cleanup` powers off OLED physically at boot + 31s (~1.5 W idle, 0 burn-in) |
 | Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, `cgroup2fs`, AppArmor, `wireguard`, `overlay`, `nf_tables` |
-| USB Host / OTG | `pm8150b_typec` + `fsa4480` + MP2650 boost | Planned | Step 6.5 |
+| USB Host / OTG | `pm8150b_typec` + `usb_1_dwc3` OTG + MP2650 5V boost | **Working** | Dual-role Type-C + 5V/1.25A OTG boost; verified with external USB hard drive |
 | Built-in 5G Modem SMS | `SDX55M` (PCIe2 MHI + `tqftpserv` + ModemManager) | Planned | P1.5 |
 
 ## Quick Operations Reference (After Flashing)

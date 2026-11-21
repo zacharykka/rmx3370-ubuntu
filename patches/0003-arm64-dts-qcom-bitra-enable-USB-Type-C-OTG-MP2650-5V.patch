@@ -1,0 +1,359 @@
+From af6f3598cffcb5501340e1cfcca79b7b2897676a Mon Sep 17 00:00:00 2001
+From: ut-bitra <ut-bitra@localhost>
+Date: Sat, 21 Nov 2026 20:08:34 +0800
+Subject: [PATCH 3/3] arm64: dts: qcom: bitra: enable USB Type-C OTG, MP2650 5V
+ boost, and 3.1872 GHz OPP
+
+- Add 5V/1.25A otg-vbus regulator_dev to mp2650_charger.c using the
+  hardware-verified MP2650 boost sequence and PM8150 GPIO3 enable pin
+- Wire pm8150b_typec dual-role USB-C connector to mp2650_vbus and
+  usb_1_dwc3_hs_out; upgrade usb_1_dwc3 to dr_mode=otg with
+  usb-role-switch and safe role-switch-default-mode=peripheral
+- Add SM8250-AC (Snapdragon 870) 3.1872 GHz prime-core OPP to
+  cpu7_opp_table, resolving the Voltage update failed freq=3187200 error
+---
+ .../boot/dts/qcom/sm8250-realme-bitra.dts     |  63 +++++++-
+ drivers/power/supply/mp2650_charger.c         | 138 ++++++++++++++++--
+ 2 files changed, 190 insertions(+), 11 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+index 03bf9b7b9..8011c462b 100644
+--- a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
++++ b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+@@ -15,6 +15,7 @@
+ #include <dt-bindings/gpio/gpio.h>
+ #include <dt-bindings/input/input.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
++#include <dt-bindings/usb/pd.h>
+ #include "sm8250.dtsi"
+ #include "pm8150.dtsi"
+ #include "pm8150b.dtsi"
+@@ -502,10 +503,16 @@ &usb_1 {
+ };
+ 
+ &usb_1_dwc3 {
+-	dr_mode = "peripheral";
++	dr_mode = "otg";
+ 	maximum-speed = "high-speed";
+ 	phys = <&usb_1_hsphy>;
+ 	phy-names = "usb2-phy";
++	usb-role-switch;
++	role-switch-default-mode = "peripheral";
++};
++
++&usb_1_dwc3_hs_out {
++	remote-endpoint = <&pm8150b_hs_in>;
+ };
+ 
+ &usb_1_hsphy {
+@@ -606,5 +613,59 @@ &i2c5 {
+ 	charger@5c {
+ 		compatible = "mps,mp2650";
+ 		reg = <0x5c>;
++		otg-enable-gpios = <&pm8150_gpios 3 GPIO_ACTIVE_HIGH>;
++
++		mp2650_vbus: otg-vbus {
++			regulator-name = "mp2650-otg-vbus";
++		};
++	};
++};
++
++/* SM8250-AC (Snapdragon 870) prime-core 3.1872 GHz OPP */
++&cpu7_opp_table {
++	cpu7_opp22: opp-3187200000 {
++		opp-hz = /bits/ 64 <3187200000>;
++		opp-peak-kBps = <8368000 51609600>;
++	};
++};
++
++/* USB Type-C dual-role port & PD PHY (Host 5V VBUS sourced by MP2650) */
++&pm8150b_typec {
++	vdd-pdphy-supply = <&vreg_l2a_3p1>;
++	status = "okay";
++
++	connector {
++		compatible = "usb-c-connector";
++
++		op-sink-microwatt = <10000000>;
++		power-role = "dual";
++		data-role = "dual";
++		self-powered;
++
++		vbus-supply = <&mp2650_vbus>;
++
++		source-pdos = <PDO_FIXED(5000, 1250,
++					 PDO_FIXED_DUAL_ROLE |
++					 PDO_FIXED_USB_COMM |
++					 PDO_FIXED_DATA_SWAP)>;
++
++		sink-pdos = <PDO_FIXED(5000, 3000,
++				       PDO_FIXED_DUAL_ROLE |
++				       PDO_FIXED_USB_COMM |
++				       PDO_FIXED_DATA_SWAP)
++			     PDO_VAR(5000, 9000, 3000)>;
++
++		ports {
++			#address-cells = <1>;
++			#size-cells = <0>;
++
++			port@0 {
++				reg = <0>;
++
++				pm8150b_hs_in: endpoint {
++					remote-endpoint = <&usb_1_dwc3_hs_out>;
++				};
++			};
++		};
+ 	};
+ };
+diff --git a/drivers/power/supply/mp2650_charger.c b/drivers/power/supply/mp2650_charger.c
+index cc7456a77..ce9b34c19 100644
+--- a/drivers/power/supply/mp2650_charger.c
++++ b/drivers/power/supply/mp2650_charger.c
+@@ -1,14 +1,16 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * MPS MP2650 2-cell (2S) buck-boost battery charger driver.
++ * MPS MP2650 2-cell (2S) buck-boost battery charger & 5V OTG boost driver.
+  *
+  * Supports standard power_supply telemetry (VIN/IIN ADCs, status, fault health,
+- * programmable input current / charge current / float voltage) and standard
++ * programmable input current / charge current / float voltage), standard
+  * charge_behaviour (auto, inhibit-charge bypass, force-discharge HIZ) for 24/7
+- * anti-swelling charge control.
++ * anti-swelling charge control, and an optional otg-vbus 5V regulator for
++ * USB Type-C Host/OTG mode.
+  */
+ 
+ #include <linux/bits.h>
++#include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/err.h>
+ #include <linux/gpio/consumer.h>
+@@ -17,6 +19,7 @@
+ #include <linux/of.h>
+ #include <linux/power_supply.h>
+ #include <linux/regmap.h>
++#include <linux/regulator/driver.h>
+ 
+ #define MP2650_REG_IIN_LIM		0x00
+ #define MP2650_IIN_LIM_MASK		GENMASK(6, 0)
+@@ -31,6 +34,13 @@
+ #define MP2650_VFLOAT_BASE_UV		3712500
+ #define MP2650_VFLOAT_STEP_UV		12500
+ 
++#define MP2650_REG_OTG_VOL		0x06
++#define MP2650_OTG_VOL_5000MV		0x05 /* 4750mV base + 5*50mV = 5000mV */
++
++#define MP2650_REG_OTG_ILIM		0x07
++#define MP2650_OTG_ILIM_MASK		GENMASK(3, 0)
++#define MP2650_OTG_ILIM_1250MA		0x05 /* 5 * 250mA = 1250mA */
++
+ #define MP2650_REG_CTRL0		0x08
+ #define MP2650_CTRL0_LEARN_EN		BIT(3) /* HIZ / force-discharge */
+ #define MP2650_CTRL0_CHG_EN		BIT(4) /* Charge enable (0 = bypass) */
+@@ -64,13 +74,18 @@
+ #define MP2650_REG_ADC_VIN_L		0x1c
+ #define MP2650_REG_ADC_IIN_L		0x1e
+ 
+-#define MP2650_MAX_REG			0x29
++#define MP2650_REG_TEST_3F		0x3f
++#define MP2650_REG_TEST_KEY		0x53
++#define MP2650_TEST_KEY_UNLOCK		0x95
++#define MP2650_MAX_REG			0x53
+ 
+ struct mp2650_charger {
+ 	struct device *dev;
+ 	struct regmap *regmap;
+ 	struct power_supply *psy;
+ 	struct gpio_desc *otg_en_gpio;
++	struct regulator_dev *otg_rdev;
++	struct mutex otg_lock;
+ };
+ 
+ static const struct regmap_config mp2650_regmap_config = {
+@@ -92,6 +107,100 @@ static int mp2650_read_adc10(struct mp2650_charger *chg, u8 reg_lo, u32 *raw)
+ 	return 0;
+ }
+ 
++static int mp2650_otg_vbus_enable(struct regulator_dev *rdev)
++{
++	struct mp2650_charger *chg = rdev_get_drvdata(rdev);
++	int ret;
++
++	mutex_lock(&chg->otg_lock);
++
++	/* Keep HW watchdog disabled while sourcing 5V OTG */
++	regmap_update_bits(chg->regmap, MP2650_REG_CTRL1,
++			   MP2650_CTRL1_WTD_MASK, 0);
++
++	/* Clear CHG_EN and LEARN_EN before enabling boost */
++	regmap_update_bits(chg->regmap, MP2650_REG_CTRL0,
++			   MP2650_CTRL0_CHG_EN | MP2650_CTRL0_LEARN_EN, 0);
++
++	/* MP2650 pre-OTG boost startup sequence (matches vendor hardware init) */
++	regmap_write(chg->regmap, MP2650_REG_TEST_KEY, MP2650_TEST_KEY_UNLOCK);
++	regmap_write(chg->regmap, MP2650_REG_TEST_3F, 0x20);
++	regmap_write(chg->regmap, MP2650_REG_TEST_KEY, 0x00);
++
++	if (chg->otg_en_gpio)
++		gpiod_set_value_cansleep(chg->otg_en_gpio, 1);
++
++	regmap_write(chg->regmap, MP2650_REG_OTG_VOL, MP2650_OTG_VOL_5000MV);
++	regmap_update_bits(chg->regmap, MP2650_REG_OTG_ILIM,
++			   MP2650_OTG_ILIM_MASK, MP2650_OTG_ILIM_1250MA);
++
++	ret = regmap_update_bits(chg->regmap, MP2650_REG_CTRL0,
++				 MP2650_CTRL0_OTG_EN, MP2650_CTRL0_OTG_EN);
++	if (ret) {
++		if (chg->otg_en_gpio)
++			gpiod_set_value_cansleep(chg->otg_en_gpio, 0);
++		mutex_unlock(&chg->otg_lock);
++		return ret;
++	}
++
++	msleep(10);
++
++	/* Clear REG3F bit 5 after boost stabilizes */
++	regmap_write(chg->regmap, MP2650_REG_TEST_KEY, MP2650_TEST_KEY_UNLOCK);
++	regmap_write(chg->regmap, MP2650_REG_TEST_3F, 0x00);
++	regmap_write(chg->regmap, MP2650_REG_TEST_KEY, 0x00);
++
++	dev_info(chg->dev, "MP2650 5V OTG VBUS boost enabled (1.25A limit)\n");
++	mutex_unlock(&chg->otg_lock);
++	return 0;
++}
++
++static int mp2650_otg_vbus_disable(struct regulator_dev *rdev)
++{
++	struct mp2650_charger *chg = rdev_get_drvdata(rdev);
++	int ret;
++
++	mutex_lock(&chg->otg_lock);
++
++	ret = regmap_update_bits(chg->regmap, MP2650_REG_CTRL0,
++				 MP2650_CTRL0_OTG_EN, 0);
++	if (chg->otg_en_gpio)
++		gpiod_set_value_cansleep(chg->otg_en_gpio, 0);
++
++	dev_info(chg->dev, "MP2650 5V OTG VBUS boost disabled\n");
++	mutex_unlock(&chg->otg_lock);
++	return ret;
++}
++
++static int mp2650_otg_vbus_is_enabled(struct regulator_dev *rdev)
++{
++	struct mp2650_charger *chg = rdev_get_drvdata(rdev);
++	unsigned int reg;
++	int ret;
++
++	ret = regmap_read(chg->regmap, MP2650_REG_CTRL0, &reg);
++	if (ret)
++		return ret;
++
++	return !!(reg & MP2650_CTRL0_OTG_EN);
++}
++
++static const struct regulator_ops mp2650_otg_vbus_ops = {
++	.enable = mp2650_otg_vbus_enable,
++	.disable = mp2650_otg_vbus_disable,
++	.is_enabled = mp2650_otg_vbus_is_enabled,
++};
++
++static const struct regulator_desc mp2650_otg_vbus_desc = {
++	.name = "mp2650-otg-vbus",
++	.of_match = of_match_ptr("otg-vbus"),
++	.owner = THIS_MODULE,
++	.ops = &mp2650_otg_vbus_ops,
++	.type = REGULATOR_VOLTAGE,
++	.fixed_uV = 5000000,
++	.n_voltages = 1,
++};
++
+ static int mp2650_get_property(struct power_supply *psy,
+ 			       enum power_supply_property psp,
+ 			       union power_supply_propval *val)
+@@ -106,7 +215,6 @@ static int mp2650_get_property(struct power_supply *psy,
+ 		ret = mp2650_read_adc10(chg, MP2650_REG_ADC_VIN_L, &raw);
+ 		if (ret)
+ 			return ret;
+-		/* VIN ADC step = 25 mV; consider USB online if VIN >= 3.5 V */
+ 		val->intval = (raw * 25 >= 3500) ? 1 : 0;
+ 		return 0;
+ 
+@@ -148,14 +256,14 @@ static int mp2650_get_property(struct power_supply *psy,
+ 		ret = mp2650_read_adc10(chg, MP2650_REG_ADC_VIN_L, &raw);
+ 		if (ret)
+ 			return ret;
+-		val->intval = raw * 25000; /* 25 mV/LSB -> uV */
++		val->intval = raw * 25000;
+ 		return 0;
+ 
+ 	case POWER_SUPPLY_PROP_CURRENT_NOW:
+ 		ret = mp2650_read_adc10(chg, MP2650_REG_ADC_IIN_L, &raw);
+ 		if (ret)
+ 			return ret;
+-		val->intval = raw * 6250; /* 6.25 mA/LSB -> uA */
++		val->intval = raw * 6250;
+ 		return 0;
+ 
+ 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+@@ -226,7 +334,6 @@ static int mp2650_set_property(struct power_supply *psy,
+ 		return regmap_write(chg->regmap, MP2650_REG_ICHG, steps);
+ 
+ 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
+-		/* Per-cell float voltage for 2S pack (clamped to safe 3.80..4.40V) */
+ 		clamped = clamp(val->intval, 3800000, 4400000);
+ 		steps = (clamped - MP2650_VFLOAT_BASE_UV) / MP2650_VFLOAT_STEP_UV;
+ 		return regmap_update_bits(chg->regmap, MP2650_REG_VFLOAT,
+@@ -300,6 +407,7 @@ static const struct power_supply_desc mp2650_psy_desc = {
+ static int mp2650_probe(struct i2c_client *client)
+ {
+ 	struct power_supply_config psy_cfg = {};
++	struct regulator_config rcfg = {};
+ 	struct mp2650_charger *chg;
+ 	unsigned int rev;
+ 	int ret;
+@@ -309,6 +417,7 @@ static int mp2650_probe(struct i2c_client *client)
+ 		return -ENOMEM;
+ 
+ 	chg->dev = &client->dev;
++	mutex_init(&chg->otg_lock);
+ 	i2c_set_clientdata(client, chg);
+ 
+ 	chg->regmap = devm_regmap_init_i2c(client, &mp2650_regmap_config);
+@@ -332,6 +441,15 @@ static int mp2650_probe(struct i2c_client *client)
+ 		return dev_err_probe(chg->dev, PTR_ERR(chg->otg_en_gpio),
+ 				     "failed to get otg-enable gpio\n");
+ 
++	/* Register 5V OTG VBUS boost regulator for Type-C Host mode */
++	rcfg.dev = chg->dev;
++	rcfg.driver_data = chg;
++	chg->otg_rdev = devm_regulator_register(chg->dev, &mp2650_otg_vbus_desc,
++						&rcfg);
++	if (IS_ERR(chg->otg_rdev))
++		return dev_err_probe(chg->dev, PTR_ERR(chg->otg_rdev),
++				     "failed to register otg-vbus regulator\n");
++
+ 	psy_cfg.drv_data = chg;
+ 	psy_cfg.fwnode = dev_fwnode(chg->dev);
+ 	chg->psy = devm_power_supply_register(chg->dev, &mp2650_psy_desc, &psy_cfg);
+@@ -339,7 +457,7 @@ static int mp2650_probe(struct i2c_client *client)
+ 		return dev_err_probe(chg->dev, PTR_ERR(chg->psy),
+ 				     "failed to register power_supply\n");
+ 
+-	dev_info(chg->dev, "MPS MP2650 2S charger probed (rev=0x%02x)\n", rev);
++	dev_info(chg->dev, "MPS MP2650 2S charger + 5V OTG boost probed (rev=0x%02x)\n", rev);
+ 	return 0;
+ }
+ 
+@@ -365,5 +483,5 @@ static struct i2c_driver mp2650_driver = {
+ };
+ module_i2c_driver(mp2650_driver);
+ 
+-MODULE_DESCRIPTION("MPS MP2650 2S Battery Charger Driver");
++MODULE_DESCRIPTION("MPS MP2650 2S Battery Charger & OTG Boost Driver");
+ MODULE_LICENSE("GPL");
+-- 
+2.43.0
+

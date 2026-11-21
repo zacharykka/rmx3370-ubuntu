@@ -1,7 +1,7 @@
 From 5f3199e3ae24077ecebfeac76b81f6f9765be58f Mon Sep 17 00:00:00 2001
 From: ut-bitra <ut-bitra@localhost>
 Date: Sat, 21 Nov 2026 19:49:24 +0800
-Subject: [PATCH 2/2] arm64: dts: qcom: bitra: add QCA6390 Wi-Fi 6, BQ28Z610,
+Subject: [PATCH 2/3] arm64: dts: qcom: bitra: add QCA6390 Wi-Fi 6, BQ28Z610,
  MP2650 charger, and OLED power-off rails
 
 - Enable PCIe0 + qca6390-pmu (GPIO20/21) for QCA6390 Wi-Fi 6 (ath11k_pci)

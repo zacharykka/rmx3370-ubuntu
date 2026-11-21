@@ -272,6 +272,11 @@ BATT=/sys/class/power_supply/bq28z610-0/capacity
 CHG=/sys/class/power_supply/mp2650-charger/charge_behaviour
 [ -r "$BATT" ] && [ -w "$CHG" ] || exit 0
 
+# Never alter charge_behaviour while sourcing 5V USB Host/OTG VBUS
+if [ "$(cat /sys/class/usb_role/a600000.usb-role-switch/role 2>/dev/null || true)" = "host" ]; then
+  exit 0
+fi
+
 SOC=$(cat "$BATT" 2>/dev/null || echo 0)
 CUR=$(tr ' ' '\n' < "$CHG" 2>/dev/null | grep '^\[' | tr -d '[]' || echo auto)
 LOW="${LOW_PCT:-55}"
