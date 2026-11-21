@@ -24,3 +24,6 @@ id_*
 
 # Local upstream Linux checkout (apply patches/*.patch)
 /kernel/
+
+# Local agent instructions (not published)
+AGENTS.md
