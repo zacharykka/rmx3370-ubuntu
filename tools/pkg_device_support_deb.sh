@@ -229,6 +229,12 @@ cat > "$STAGE/etc/NetworkManager/conf.d/10-bitra-dns-default.conf" << "NMDNS"
 dns=default
 NMDNS
 
+# 7d. Disable Wi-Fi Power Save for low-latency 24/7 headless server (avoids 300-1200ms QCA6390 ping spikes)
+cat > "$STAGE/etc/NetworkManager/conf.d/99-bitra-wifi-powersave-off.conf" << "NMPS"
+[connection]
+wifi.powersave = 2
+NMPS
+
 # 8. Allow chrony to step clock from 1970 RTC on boot
 cat > "$STAGE/etc/chrony/conf.d/10-bitra-rtc.conf" << "CHRONY"
 makestep 1.0 -1

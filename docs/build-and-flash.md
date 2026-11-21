@@ -54,6 +54,8 @@ cd ..
 >   4. **SDX55M 5G modem firmware & carrier MCFG** — **Entire `image/sdx55m/*` (`sbl1.mbn`, `qdsp6sw.mbn`, `apps.mbn`, `aop.mbn`, `tz.mbn`, `hyp.mbn`, `acdb.mbn`, `multi_image*.mbn`, `xbl_cfg.elf`, `apdp.mbn`, `devcfg.mbn`, `sec.elf`)** and **`image/modem_pr/*`** from stock **`modem` (`NON-HLOS.bin`)**.
 >   5. **Device-unique SDX55M EFS read-only snapshot** — **`mdm1m9kefs1`, `mdm1m9kefs2`, `mdm1m9kefs3`, `mdmddr`** dumped **read-only** from your own phone's UFS partitions via `sudo bitra-extract-sdx55-fw`. (**Never share your EFS files and never write to raw UFS EFS partitions.**)
 
+> **Pre-Extracted Generic Stock Firmware Pack (GitHub Release)**: To save time, the **generic (non-device-unique)** stock files (`bitra_dtbo_0.dtbo`, QCA6390 Wi-Fi 6 firmware, SDX55M `sdx55m/*`, and `modem_pr/*`) are also attached to the **[`firmware-rmx3370-stock` GitHub Release](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.xz`). **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) contain your phone's personal IMEI and are STRICTLY EXCLUDED — you must always extract them read-only from your own phone via `sudo bitra-extract-sdx55-fw`.**
+
 Stage build-time inputs on your build host:
 ```bash
 mkdir -p private/stock
@@ -90,11 +92,11 @@ make -j$(nproc) -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" \
 # Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra9_1_arm64.deb
 OUT="$PWD/out/server-build" bash tools/pkg_kernel_deb.sh
 
-# Device integration package -> out/debs/bitra-device-support_0.5_arm64.deb
+# Device integration package -> out/debs/bitra-device-support_0.6_arm64.deb
 # Includes: USB CDC-ECM service, key-only SSH config, NetworkManager usb0 unmanaged rule,
 #           compact initramfs-tools config (MODULES=list), Wi-Fi MAC udev rule,
 #           24/7 anti-swelling charge-limit systemd timer, 24/7 no-suspend policy
-bash tools/pkg_device_support_deb.sh 0.5
+bash tools/pkg_device_support_deb.sh 0.6
 ```
 
 ---

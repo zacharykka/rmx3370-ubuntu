@@ -165,3 +165,11 @@ dns=default`) in `bitra-device-support`.
   `ssr:AP:remotefs_sahara.c:850:Assertion remotefs_sahara_info.sahara_status == SAHARA_END_OF_IMG_TRANSFER fail:`
   SDX55M runs in Remote EFS mode (`sdx55.rmtefsmd.prod`) and periodically pushes 2 MiB `m9kefs1`/`m9kefs2` snapshots over **MHI channels `10/11` (`"EFS"`)** using Sahara `MEM_DEBUG` (`mode=2`). Without a host EFS Sync responder on channels `10/11`, `remotefs_sahara` timed out and crashed the modem.
 - **Fix**: Expose MHI channels `10/11` (`"EFS"`) via `WWAN_PORT_EFS` (`/dev/wwan0efs0`) and run `bitra-sdx55-efs-sync.service`, which receives `m9kefs1`/`m9kefs2` (~330 ms each), writes them atomically to `/var/lib/bitra/sdx55m-efs-rw/` (**never touching raw UFS EFS partitions**), and completes the transaction with `SAHARA_RESET (0x07)` / `SAHARA_RESET_RESP (0x08)`.
+
+---
+
+## 22. QCA6390 Wi-Fi Power Save Latency Spikes (`300–1200 ms`) & SSH Banner Timeouts
+- **Symptom**: Over Wi-Fi 6 (`wlp1s0`), `ping` periodically spiked to `380–1200 ms` and SSH connections occasionally timed out during banner exchange.
+- **Root Cause**: Ubuntu ships `/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf` (`wifi.powersave = 3`), keeping `ath11k_pci` (`QCA6390`) in 802.11 power-save sleep between DTIM beacons.
+- **Fix**: Ship `/etc/NetworkManager/conf.d/99-bitra-wifi-powersave-off.conf` (`[connection]
+wifi.powersave = 2`) in `bitra-device-support` (latency drops to ~6 ms consistently).

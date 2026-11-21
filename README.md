@@ -39,6 +39,8 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | **5G Modem Read-Only EFS Snapshot** | **Device-unique `mdm1m9kefs1`, `mdm1m9kefs2`, `mdm1m9kefs3`, `mdmddr`** (**MUST be dumped read-only from YOUR OWN phone; NEVER share or overwrite raw UFS EFS!**) | **Device UFS `/dev/disk/by-partlabel/mdm1m9kefs{1,2,3}` & `mdmddr`** | `/var/lib/bitra/sdx55m-efs/` (via `sudo bitra-extract-sdx55-fw`) |
 | **Stock Rollback Backup (Strongly Recommended)** | **Original `boot.img`, `dtbo.img`, `persist.img`, `mdm1m9kefs1/2/3`** | **Your device before flashing** | Safe external backup on host |
 
+> **Pre-Extracted Generic Stock Firmware Pack (GitHub Release)**: To save time, the **generic (non-device-unique)** stock files (`bitra_dtbo_0.dtbo`, QCA6390 Wi-Fi 6 firmware, SDX55M `sdx55m/*`, and `modem_pr/*`) are also attached to the **[`firmware-rmx3370-stock` GitHub Release](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.xz`). **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) contain your phone's personal IMEI and are STRICTLY EXCLUDED — you must always extract them read-only from your own phone via `sudo bitra-extract-sdx55-fw`.**
+
 > **One-Command On-Device Modem Extraction**: Once Ubuntu is running on the phone, **`sudo bitra-extract-sdx55-fw`** automatically mounts the `modem` partition **read-only** and safely extracts **`sdx55m/`**, **`modem_pr/`**, and the read-only **`mdm1m9kefs{1,2,3}` + `mdmddr`** snapshots (runtime EFS syncs write only to `/var/lib/bitra/sdx55m-efs-rw/` and never touch raw UFS).
 
 ## Quick Operations Reference (After Flashing)
