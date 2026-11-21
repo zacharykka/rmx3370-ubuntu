@@ -115,3 +115,53 @@ A field log of every non-obvious hardware, bootloader, kernel, initramfs, and us
   - `REG08 bit 4` (`CHG_EN = 0`) stops battery charging while **USB continues powering VSYS** (`inhibit-charge` bypass mode).
   - `REG08 bit 3` (`LEARN_EN = 1`) enters **HIZ / force-discharge** mode (USB input drops to ~50 mA so an overfull 100% battery discharges safely down to 75% without unplugging the cable).
   - `REG16..REG1F` provide live 10-bit ADCs (VBAT/VSYS/ICHG `12.5 mV|mA/LSB`, VIN `25 mV/LSB`, IIN `6.25 mA/LSB`).
+
+---
+
+## 15. Docker `iptables v1.8.10 (nf_tables): RULE_APPEND failed (No such file or directory)`
+- **Symptom**: `dockerd` failed on startup inside `Error initializing network controller` with `iptables v1.8.10 (nf_tables): RULE_APPEND failed (No such file or directory): rule in chain PREROUTING`.
+- **Root Cause**: Ubuntu 24.04's default `iptables-nft` translates `iptables` rules into `nf_tables` expressions backed by xtables compat modules (`CONFIG_NFT_COMPAT`, `CONFIG_NETFILTER_XT_NAT`, `CONFIG_NETFILTER_XT_TARGET_MASQUERADE`, `CONFIG_IP_NF_NAT`, `CONFIG_BRIDGE_NETFILTER`), which were missing from the minimal `defconfig` + `nf_tables` fragment.
+- **Fix**: Enable `CONFIG_NFT_COMPAT=m`, `CONFIG_NETFILTER_XT_NAT=m`, `CONFIG_NETFILTER_XT_TARGET_{MASQUERADE,REDIRECT}=m`, `CONFIG_NETFILTER_XT_MATCH_{STATE,MULTIPORT,LIMIT}=m`, `CONFIG_IP_NF_*`, `CONFIG_IP6_NF_*`, `CONFIG_NFT_{REDIR,REJECT*}`, and `CONFIG_BRIDGE_NETFILTER=m` in `kernel-cfg/10-bitra-server.config`.
+
+---
+
+## 16. NetworkManager `/etc/resolv.conf` Pointing to Uninstalled `systemd-resolved` (`127.0.0.53`)
+- **Symptom**: After connecting Wi-Fi via `nmcli`, `apt update` could not resolve hostnames when a static `/etc/resolv.conf` was removed or symlinked to `/run/NetworkManager/resolv.conf`.
+- **Root Cause**: Without `systemd-resolved` installed, NetworkManager must be explicitly configured with `dns=default` so it writes DHCP-provided DNS servers directly into `/etc/resolv.conf`.
+- **Fix**: Ship `/etc/NetworkManager/conf.d/10-bitra-dns-default.conf` (`[main]
+dns=default`) in `bitra-device-support`.
+
+---
+
+## 17. SDX55M PCIe2 SMMU Context Fault (`iova=0x64100000`, `SID=0x1d01`)
+- **Symptom**: Enabling `&pcie2` let `mhi-pci-generic` load `sbl1.mbn` via BHI, but as soon as SBL initialized MHI, `arm-smmu 15000000.iommu` threw `Unhandled context fault: iova=0x64100000, SID=0x1d01` and MHI timed out.
+- **Root Cause**: Upstream `pcie-designware-host` assigns `pp->msi_data = pp->cfg0_base` (`0x64100000`) for DWC iMSI-RX; SDX55M SBL's MHI MSIs escaped iMSI-RX into the SMMU. Stock RMX3370 routes PCIe2 MSIs through SM8250's native **GICv3-MBI** (`qcom,pcie2_msi@17a10040`, SPIs `0x340..0x35f`).
+- **Fix**: Enable GICv3-MBI on `&intc` (`msi-controller; mbi-alias = <0x0 0x17a10000>; mbi-ranges = <864 32>;`) and map `&pcie2` with `msi-map = <0x0 &intc 0x0 0x1000>;` (leaving `&pcie0` Wi-Fi untouched on DWC iMSI-RX).
+
+---
+
+## 18. SDX55M PCI ID Collision (`17cb:0306` / `17cb:010c`) & ABL Root `compatible` Override
+- **Symptom**: SDX55M in PBL/BHI reports PCI ID `17cb:0306` with subsystem `17cb:010c`, which `mhi_pci_generic.c` matched to `mhi_foxconn_sdx55_info` (a flash-equipped M.2 laptop card with `.fw = NULL`). Checking `of_machine_is_compatible("realme,bitra")` also missed because stock ABL DTBO overwrites the root node `compatible` to `qcom,kona-mtp`.
+- **Fix**: Override `mhi_foxconn_sdx55_info` -> `mhi_qcom_sdx55_info` when `of_machine_is_compatible("qcom,sm8250") || of_machine_is_compatible("qcom,kona")`, with a dedicated RMX3370 MHI channel/event table (`SAHARA 2/3`, `DIAG 4/5`, `EFS 10/11`, `QMI 14/15`, `IP_CTRL 18/19`, `IPCR 20/21`, `DUN 32/33`, `IP_SW0`, `IP_HW0`, `.no_m3 = true`, `.sideband_wake = true`, `.timeout_ms = 60000`).
+
+---
+
+## 19. SDX55M Stalls in SBL After Sahara `DONE_RESP=1` Without `ap2mdm_status` (GPIO 56)
+- **Symptom**: After loading all 15 Sahara images (`qdsp6sw.mbn`, `apps.mbn`, EFS, TZ/AOP/HYP) cleanly (`DONE_RESP image_tx_status=1`), SDX55M stayed in SBL indefinitely instead of entering AMSS. Also, Ubuntu 24.04's `gpiod 1.6.3` returned `EINVAL` because Linux 7.4 disables legacy `CONFIG_GPIO_CDEV_V1`.
+- **Fix**: Drive SM8250 TLMM `ap2mdm_status` (GPIO 56) = `1` and `ap2mdm_errfatal` (GPIO 57) = `0` via Linux GPIO cdev ABI v2 ioctl (`bitra-sdx55-gpio.py` / `bitra-ap2mdm-gpio.service`). SDX55M immediately raises `mdm2ap_status` (GPIO 3) = `1` and enters `MISSION MODE (AMSS)` within 1 second.
+
+---
+
+## 20. Stock `tftp_server` QRTR Service `4096` Encoding (`tqftpserv-sdx55`)
+- **Symptom**: Upstream `tqftpserv` failed to serve SDX55M MPSS (`MPSS` never sent TFTP requests) because upstream scans `/sys/class/remoteproc` (which does not exist for PCIe-attached SDX55M) and only registers QRTR `Service 4096` once.
+- **Root Cause**: Reverse-engineering vendor `tftp_server` revealed it registers `Service 4096` raw instances `1..10` on **10 separate QRTR sockets** (`qrtr_publish(fd[i], 4096, /*version=*/1..10, /*instance=*/0)`). Calling `qrtr_publish()` repeatedly on the same fd overwrites previous registrations.
+- **Fix**: Built `tools/tqftpserv-sdx55/` publishing `Service 4096` versions `1..10` on 10 separate sockets with 2 MiB buffers and direct `/lib/firmware/` + `/var/lib/tqftpserv/` mapping. MPSS immediately reads `/lib/firmware/modem_pr/...` (`711_0_0.mbn`, `mbn_sw.dig`) and writes `/readwrite/mcfg.tmp`.
+
+---
+
+## 21. SDX55M Periodic ~120–150s Crash (`remotefs_sahara.c:850` EFS Sync Timeout)
+- **Symptom**: ~120–150s after entering AMSS, SDX55M asserted `mdm2ap_errfatal=1` and triggered a PCIe2 Link Down.
+- **Root Cause**: Capturing the live Sahara `MEM_DEBUG` dump (`md_SHRDIMEM.BIN`) revealed the exact MPSS assertion:
+  `ssr:AP:remotefs_sahara.c:850:Assertion remotefs_sahara_info.sahara_status == SAHARA_END_OF_IMG_TRANSFER fail:`
+  SDX55M runs in Remote EFS mode (`sdx55.rmtefsmd.prod`) and periodically pushes 2 MiB `m9kefs1`/`m9kefs2` snapshots over **MHI channels `10/11` (`"EFS"`)** using Sahara `MEM_DEBUG` (`mode=2`). Without a host EFS Sync responder on channels `10/11`, `remotefs_sahara` timed out and crashed the modem.
+- **Fix**: Expose MHI channels `10/11` (`"EFS"`) via `WWAN_PORT_EFS` (`/dev/wwan0efs0`) and run `bitra-sdx55-efs-sync.service`, which receives `m9kefs1`/`m9kefs2` (~330 ms each), writes them atomically to `/var/lib/bitra/sdx55m-efs-rw/` (**never touching raw UFS EFS partitions**), and completes the transaction with `SAHARA_RESET (0x07)` / `SAHARA_RESET_RESP (0x08)`.

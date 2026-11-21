@@ -42,17 +42,26 @@ cd ..
 
 ---
 
-## 3. Stage Device-Local Inputs (Never Committed to Git)
+## 3. Stage Device-Local Inputs Extracted From Official Stock Images (Never Committed to Git)
 
-All device-specific files live under `private/` (gitignored):
+> **⚠️ IMPORTANT — What You MUST Extract From Official Stock `*.img` / Device Partitions:**
+> This repository intentionally ships **zero** proprietary Qualcomm/realme firmware blobs or device-unique partitions. You must supply these from your own RMX3370 official stock firmware (`dtbo.img`, `NON-HLOS.bin` / `modem`) and your device's own UFS partitions:
+> - **At build time (on build host, under gitignored `private/`)**:
+>   1. **`private/stock/bitra_dtbo_0.dtbo`** — **Entry `0` extracted from official stock `dtbo.img`** (`mkdtimg dump dtbo.img -b bitra_dtbo_`). Required by `tools/inject_dtbo_sink.py` so ABL applies stock `dtbo` onto our mainline DTB cleanly without modifying the `dtbo` partition.
+>   2. **`private/authorized_keys`** — Your SSH public key (password SSH is disabled by default).
+> - **At first boot (on the phone, read-only extraction from stock UFS partitions — see Section 7.2 & 7.3)**:
+>   3. **QCA6390 Wi-Fi 6 firmware** — **`amss20.bin` (`-> amss.bin`) & `m3.bin`** from stock **`modem` (`NON-HLOS.bin`)**, plus device-own **`bdwlan.elf` (`-> board.bin`)** from **`persist` (`/dev/sda2`)**.
+>   4. **SDX55M 5G modem firmware & carrier MCFG** — **Entire `image/sdx55m/*` (`sbl1.mbn`, `qdsp6sw.mbn`, `apps.mbn`, `aop.mbn`, `tz.mbn`, `hyp.mbn`, `acdb.mbn`, `multi_image*.mbn`, `xbl_cfg.elf`, `apdp.mbn`, `devcfg.mbn`, `sec.elf`)** and **`image/modem_pr/*`** from stock **`modem` (`NON-HLOS.bin`)**.
+>   5. **Device-unique SDX55M EFS read-only snapshot** — **`mdm1m9kefs1`, `mdm1m9kefs2`, `mdm1m9kefs3`, `mdmddr`** dumped **read-only** from your own phone's UFS partitions via `sudo bitra-extract-sdx55-fw`. (**Never share your EFS files and never write to raw UFS EFS partitions.**)
 
-1. **Stock DTBO (`private/stock/bitra_dtbo_0.dtbo`)**:
-   Extract entry `0` from your phone's stock `dtbo.img` (using `mkdtimg dump dtbo.img -b bitra_dtbo_`). Our offline DTBO sink tool (`tools/inject_dtbo_sink.py`) reads `__fixups__` from this file so the stock bootloader (`ABL`) can apply the stock `dtbo` partition onto our mainline DTB without errors or modifying the `dtbo` partition.
-2. **SSH Public Key (`private/authorized_keys`)**:
-   ```bash
-   mkdir -p private/stock
-   cp ~/.ssh/id_ed25519.pub private/authorized_keys
-   ```
+Stage build-time inputs on your build host:
+```bash
+mkdir -p private/stock
+# 1. Extract bitra_dtbo_0.dtbo from official stock dtbo.img (using AOSP mkdtimg)
+mkdtimg dump /path/to/stock/dtbo.img -b private/stock/bitra_dtbo_
+# 2. Copy your SSH public key
+cp ~/.ssh/id_ed25519.pub private/authorized_keys
+```
 
 ---
 
@@ -65,7 +74,8 @@ mkdir -p "$OUT"
 
 # Start from upstream defconfig + server config fragment
 make -C kernel O="$OUT" ARCH=arm64 defconfig
-(cd kernel && ARCH=arm64 scripts/kconfig/merge_config.sh -m -O "$OUT" "$OUT/.config" ../kernel-cfg/10-bitra-server.config)
+# IMPORTANT: Merge BOTH 00-base-sm8250-ram.config (built-in UFS/PHY/USB/pstore =y) AND 10-bitra-server.config!
+(cd kernel && ARCH=arm64 scripts/kconfig/merge_config.sh -m -O "$OUT" "$OUT/.config" ../kernel-cfg/00-base-sm8250-ram.config ../kernel-cfg/10-bitra-server.config)
 make -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" olddefconfig
 make -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" prepare
 
@@ -77,14 +87,14 @@ make -j$(nproc) -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" \
 
 ### 4.2 Build `.deb` Packages
 ```bash
-# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra4_1_arm64.deb
+# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra9_1_arm64.deb
 OUT="$PWD/out/server-build" bash tools/pkg_kernel_deb.sh
 
-# Device integration package -> out/debs/bitra-device-support_0.3_arm64.deb
+# Device integration package -> out/debs/bitra-device-support_0.5_arm64.deb
 # Includes: USB CDC-ECM service, key-only SSH config, NetworkManager usb0 unmanaged rule,
 #           compact initramfs-tools config (MODULES=list), Wi-Fi MAC udev rule,
 #           24/7 anti-swelling charge-limit systemd timer, 24/7 no-suspend policy
-bash tools/pkg_device_support_deb.sh 0.3
+bash tools/pkg_device_support_deb.sh 0.5
 ```
 
 ---
@@ -96,12 +106,12 @@ bash tools/pkg_device_support_deb.sh 0.3
 # installs server packages + our two .debs via qemu-aarch64-static chroot,
 # generates compact initrd (< 8 MiB), and outputs:
 #   out/ubuntu-24.04.5-bitra-server-arm64.tar.gz
-#   out/initrd.img-7.4.0-rc3-bitra4
+#   out/initrd.img-7.4.0-rc3-bitra9
 bash tools/build_ubuntu_rootfs.sh
 
 # Injects DTBO sink symbols, verifies offline fdtoverlay apply, checks initrd <= 14 MiB,
 # builds Android boot_v2 image, and appends 96 MiB AVB hash footer:
-#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra4.img
+#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra9.img
 OUT="$PWD/out/server-build" bash tools/make_ubuntu_boot.sh
 ```
 
@@ -158,12 +168,12 @@ chroot /mnt /usr/bin/python3 -c 'import ctypes; ctypes.CDLL("libc.so.6").syscall
 
 ### 7.1 Always RAM-Test Before Flashing
 ```bash
-fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra4.img
+fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra9.img
 ```
 Wait ~20–25 seconds, then SSH in:
 ```bash
 ssh ubuntu@192.168.2.15
-uname -a                    # 7.4.0-rc3-bitra4 aarch64
+uname -a                    # 7.4.0-rc3-bitra9 aarch64
 systemctl is-system-running # running (0 failed units)
 df -h /                     # /dev/sda11 ~222G
 ```
@@ -181,13 +191,32 @@ sudo chmod 644 /lib/firmware/updates/ath11k/QCA6390/hw2.0/*
 sudo umount /tmp/ro_persist /tmp/ro_modem
 ```
 
+### 7.2b Extract Device-Own SDX55M 5G Modem Firmware, MCFG & Read-Only EFS Snapshot (Local Only)
+On the phone over SSH (requires `modemmanager`, `qrtr-tools`, and `libqrtr-dev` if building `tqftpserv-sdx55` from `tools/tqftpserv-sdx55/`):
+```bash
+# Install ModemManager & QRTR runtime (if not already installed)
+sudo apt update && sudo apt install -y modemmanager qrtr-tools
+
+# Extract SDX55M firmware (image/sdx55m/*), MCFG (image/modem_pr/*),
+# and read-only EFS snapshots (mdm1m9kefs1/2/3, mdmddr) from stock UFS partitions:
+sudo bitra-extract-sdx55-fw
+
+# Optional: if your active SIM/eSIM is in physical Slot 2, persist slot selection:
+echo 'SIM_SLOT="2"' | sudo tee /etc/default/bitra-sdx55
+
+# Verify after reboot:
+mmcli -m 0
+mmcli -m 0 --messaging-list-sms
+```
+> **EFS Safety**: Runtime EFS syncs from SDX55M (`bitra-sdx55-efs-sync.service` over `/dev/wwan0efs0`) are written **only** to `/var/lib/bitra/sdx55m-efs-rw/`. The phone's factory UFS EFS partitions (`/dev/disk/by-partlabel/mdm1m9kefs*`) are **never** written to.
+
 ### 7.3 Flash `boot` Partition & Verify Cold Boot
 ```bash
 # On the phone (reboots straight into Fastboot, no buttons needed):
 sudo reboot bootloader
 
 # On your host:
-fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra4.img
+fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra9.img
 fastboot -s <SERIAL> reboot
 ```
 After ~25 seconds, cold-boot SSH (`ssh ubuntu@192.168.2.15`) is live; after ~32 seconds, `regulator_late_cleanup` powers off the OLED rails (`vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15` -> `disabled`).

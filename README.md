@@ -6,10 +6,10 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 - **[Build, Package & Flash Guide](docs/build-and-flash.md)** — Complete step-by-step instructions from upstream Linux source to cold-booting Ubuntu 24.04.5 LTS Server, Wi-Fi 6 setup, anti-swelling charge control, and recovery.
 - **[Bring-Up Pitfalls & Debugging Notes](docs/pitfalls-and-debugging.md)** — Every real RMX3370 hardware/bootloader/initramfs pitfall hit during development (with root causes, `pstore` evidence, and exact fixes).
 - **[Hardware & Milestone Status](docs/status.md)** — Live bring-up checklist and verified hardware capabilities.
-- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra4`).
+- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra9`).
 - **[Technical Debt Tracker](docs/tech-debt.md)** — Known temporary workarounds and exit criteria.
 
-## Verified Working Hardware (`7.4.0-rc3-bitra5`, Flashed & Cold-Boot Verified)
+## Verified Working Hardware (`7.4.0-rc3-bitra9`, Flashed & Cold-Boot Verified)
 
 | Subsystem | Hardware / Driver | Status | Notes |
 |---|---|---|---|
@@ -21,9 +21,25 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | Battery Fuel Gauge | `TI BQ28Z610` (`bq27xxx`, `i2c16@0x55`) | **Working** | 2S pack voltage (~7.4–8.8 V), current, SOC, cycle count, temperature |
 | 2S Charger & Anti-Swelling | `MPS MP2650` (`mp2650_charger`, `i2c5@0x5c`) | **Working** | Upstream `charge_behaviour` (`auto`, `inhibit-charge` USB bypass, `force-discharge` HIZ) + 60s systemd timer (`55%–75%` band) |
 | OLED Screen-Off | `vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15` | **Working** | RPMh `regulator_late_cleanup` powers off OLED physically at boot + 31s (~1.5 W idle, 0 burn-in) |
-| Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, `cgroup2fs`, AppArmor, `wireguard`, `overlay`, `nf_tables` |
+| Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, Docker (`overlayfs`, `cgroup2fs`, `iptables-nft` NAT/bridge), AppArmor, `wireguard`, `nf_tables` |
 | USB Host / OTG | `pm8150b_typec` + `usb_1_dwc3` OTG + MP2650 5V boost | **Working** | Dual-role Type-C + 5V/1.25A OTG boost; verified with external USB hard drive |
-| Built-in 5G Modem SMS | `SDX55M` (PCIe2 MHI + `tqftpserv` + ModemManager) | Planned | P1.5 |
+| Built-in 5G Modem + SMS | `SDX55M` (PCIe2 MHI + Sahara + EFS Sync + `tqftpserv-sdx55` + `ModemManager`) | **Working** | Cold-boots AMSS automatically (~16s), continuous local EFS sync (raw UFS untouched), live cellular registration & `mmcli` SMS ready; device-local firmware |
+
+## ⚠️ Required Proprietary Files Extracted From Official Stock Images / Device Partitions
+
+**Because this repository contains zero proprietary OEM blobs, EFS data, or device-unique partitions, you MUST extract the following files from your own RMX3370 official stock ROM (`*.img`) or device UFS partitions (read-only):**
+
+| Target Feature | **Required Files to Extract (from Official Stock IMG / Device)** | **Source Partition / Official IMG** | **Destination Path** |
+|---|---|---|---|
+| **Bootloader DTBO Sink (Required to Boot)** | **`bitra_dtbo_0.dtbo`** (DTBO entry `0`, dumped via `mkdtimg dump dtbo.img -b bitra_dtbo_`) | **Stock `dtbo` partition / official `dtbo.img`** | `private/stock/bitra_dtbo_0.dtbo` (build host) |
+| **Wi-Fi 6 (`QCA6390`)** | **`amss20.bin` (rename to `amss.bin`)**, **`m3.bin`** | **Stock `modem` partition / official `NON-HLOS.bin`** (`image/`) | `/lib/firmware/updates/ath11k/QCA6390/hw2.0/` |
+| **Wi-Fi 6 Board Calibration** | **`bdwlan.elf` (rename to `board.bin`)** | **Device-own `persist` partition (`/dev/sda2`, read-only)** | `/lib/firmware/updates/ath11k/QCA6390/hw2.0/board.bin` |
+| **Built-in 5G Modem (`SDX55M`)** | **Entire `image/sdx55m/` directory** (**`sbl1.mbn`, `qdsp6sw.mbn`, `apps.mbn`, `aop.mbn`, `tz.mbn`, `hyp.mbn`, `acdb.mbn`, `multi_image.mbn`, `multi_image_qti.mbn`, `xbl_cfg.elf`, `apdp.mbn`, `devcfg.mbn`, `sec.elf`**) | **Stock `modem` partition / official `NON-HLOS.bin`** (`image/sdx55m/`) | `/lib/firmware/updates/qcom/sdx55m/` |
+| **5G Modem Carrier Configs (MCFG)** | **Entire `image/modem_pr/` directory** (served over QRTR TFTP by `tqftpserv-sdx55`) | **Stock `modem` partition / official `NON-HLOS.bin`** (`image/modem_pr/`) | `/lib/firmware/modem_pr/` |
+| **5G Modem Read-Only EFS Snapshot** | **Device-unique `mdm1m9kefs1`, `mdm1m9kefs2`, `mdm1m9kefs3`, `mdmddr`** (**MUST be dumped read-only from YOUR OWN phone; NEVER share or overwrite raw UFS EFS!**) | **Device UFS `/dev/disk/by-partlabel/mdm1m9kefs{1,2,3}` & `mdmddr`** | `/var/lib/bitra/sdx55m-efs/` (via `sudo bitra-extract-sdx55-fw`) |
+| **Stock Rollback Backup (Strongly Recommended)** | **Original `boot.img`, `dtbo.img`, `persist.img`, `mdm1m9kefs1/2/3`** | **Your device before flashing** | Safe external backup on host |
+
+> **One-Command On-Device Modem Extraction**: Once Ubuntu is running on the phone, **`sudo bitra-extract-sdx55-fw`** automatically mounts the `modem` partition **read-only** and safely extracts **`sdx55m/`**, **`modem_pr/`**, and the read-only **`mdm1m9kefs{1,2,3}` + `mdmddr`** snapshots (runtime EFS syncs write only to `/var/lib/bitra/sdx55m-efs-rw/` and never touch raw UFS).
 
 ## Quick Operations Reference (After Flashing)
 ```bash
@@ -38,6 +54,14 @@ sudo nmcli dev wifi connect "<SSID>" password "<PASSWORD>"
 cat /sys/class/power_supply/bq28z610-0/{capacity,voltage_now,current_now,temp}
 cat /sys/class/power_supply/mp2650-charger/{charge_behaviour,voltage_now,current_now}
 cat /etc/bitra-charge-limit.conf
+
+# Built-in SDX55M 5G modem (first-time local read-only firmware/EFS extraction)
+sudo bitra-extract-sdx55-fw
+# Optional: select SIM Slot 2 (e.g. eSIM chip card in slot 2) on boot
+echo 'SIM_SLOT="2"' | sudo tee /etc/default/bitra-sdx55
+# Check live cellular registration and SMS via ModemManager
+mmcli -m 0
+mmcli -m 0 --messaging-list-sms
 
 # Reboot straight into Fastboot without touching physical buttons
 sudo reboot bootloader

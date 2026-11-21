@@ -1,0 +1,208 @@
+From 833b48fde8b6bd02a5f50ddba27498ac6880939d Mon Sep 17 00:00:00 2001
+From: ut-bitra <ut-bitra@localhost>
+Date: Sat, 21 Nov 2026 22:54:24 +0800
+Subject: [PATCH] arm64: dts: qcom: bitra: enable SDX55M 5G modem over PCIe2
+ MHI + Sahara/EFS
+
+- Enable pcie2, pcie2_phy, mdm2ap/ap2mdm TLMM pinctrl, and GICv3-MBI on intc (SPIs 864..895) to avoid DWC iMSI-RX SMMU faults on SBL/MHI MSIs.
+
+- Add SM8250/kona flashless SDX55M MHI channel/event table (SAHARA 2/3, DIAG 4/5, EFS 10/11, QMI 14/15, IP_CTRL 18/19, IPCR 20/21, DUN 32/33, IP_SW0, IP_HW0) and override Foxconn 17cb:0306/17cb:010c subsys collision.
+
+- Add WWAN_PORT_SAHARA and WWAN_PORT_EFS chardevs in wwan_core and mhi_wwan_ctrl.
+---
+ .../boot/dts/qcom/sm8250-realme-bitra.dts     | 35 ++++++++++++
+ drivers/bus/mhi/host/pci_generic.c            | 57 ++++++++++++++++++-
+ drivers/net/wwan/mhi_wwan_ctrl.c              |  2 +
+ drivers/net/wwan/wwan_core.c                  |  8 +++
+ include/linux/wwan.h                          |  3 +
+ 5 files changed, 103 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+index 8011c462b..7ef2bef92 100644
+--- a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
++++ b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+@@ -669,3 +669,38 @@ pm8150b_hs_in: endpoint {
+ 		};
+ 	};
+ };
++
++/* External SDX55M 5G modem control GPIOs & PCIe2 (P1.5) */
++&tlmm {
++	mdm2ap_default: mdm2ap-default-state {
++		pins = "gpio1", "gpio3";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-disable;
++	};
++
++	ap2mdm_default: ap2mdm-default-state {
++		pins = "gpio56", "gpio57";
++		function = "gpio";
++		drive-strength = <16>;
++		bias-disable;
++	};
++};
++
++&intc {
++	msi-controller;
++	mbi-alias = <0x0 0x17a10000>;
++	mbi-ranges = <864 32>;
++};
++
++&pcie2 {
++	msi-map = <0x0 &intc 0x0 0x1000>;
++	pinctrl-0 = <&pcie2_default_state &mdm2ap_default &ap2mdm_default>;
++	status = "okay";
++};
++
++&pcie2_phy {
++	vdda-phy-supply = <&vreg_l5a_0p88>;
++	vdda-pll-supply = <&vreg_l9a_1p2>;
++	status = "okay";
++};
+diff --git a/drivers/bus/mhi/host/pci_generic.c b/drivers/bus/mhi/host/pci_generic.c
+index ca9ef4aaa..cd879bf92 100644
+--- a/drivers/bus/mhi/host/pci_generic.c
++++ b/drivers/bus/mhi/host/pci_generic.c
+@@ -12,6 +12,7 @@
+ #include <linux/device.h>
+ #include <linux/mhi.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/pci.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/timer.h>
+@@ -405,16 +406,59 @@ static const struct mhi_pci_dev_info mhi_qcom_sdx65_info = {
+ 	.sideband_wake = false,
+ };
+ 
++static const struct mhi_channel_config modem_qcom_sdx55_mhi_channels[] = {
++	MHI_CHANNEL_CONFIG_UL_SBL(2, "SAHARA", 128, 1),
++	MHI_CHANNEL_CONFIG_DL_SBL(3, "SAHARA", 128, 1),
++	MHI_CHANNEL_CONFIG_UL(4, "DIAG", 16, 2),
++	MHI_CHANNEL_CONFIG_DL(5, "DIAG", 16, 2),
++	MHI_CHANNEL_CONFIG_UL(10, "EFS", 64, 1),
++	MHI_CHANNEL_CONFIG_DL(11, "EFS", 64, 1),
++	MHI_CHANNEL_CONFIG_UL(14, "QMI", 32, 0),
++	MHI_CHANNEL_CONFIG_DL(15, "QMI", 32, 0),
++	MHI_CHANNEL_CONFIG_UL(18, "IP_CTRL", 32, 0),
++	MHI_CHANNEL_CONFIG_DL(19, "IP_CTRL", 32, 0),
++	MHI_CHANNEL_CONFIG_UL(20, "IPCR", 8, 0),
++	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 8, 0),
++	MHI_CHANNEL_CONFIG_UL(32, "DUN", 32, 0),
++	MHI_CHANNEL_CONFIG_DL(33, "DUN", 32, 0),
++	MHI_CHANNEL_CONFIG_UL_FP(34, "FIREHOSE", 32, 0),
++	MHI_CHANNEL_CONFIG_DL_FP(35, "FIREHOSE", 32, 0),
++	MHI_CHANNEL_CONFIG_UL(46, "IP_SW0", 64, 3),
++	MHI_CHANNEL_CONFIG_DL(47, "IP_SW0", 64, 4),
++	MHI_CHANNEL_CONFIG_HW_UL(100, "IP_HW0", 128, 5),
++	MHI_CHANNEL_CONFIG_HW_DL(101, "IP_HW0", 128, 6),
++};
++
++static struct mhi_event_config modem_qcom_sdx55_mhi_events[] = {
++	MHI_EVENT_CONFIG_CTRL(0, 64),
++	MHI_EVENT_CONFIG_SW_DATA(1, 256),
++	MHI_EVENT_CONFIG_DATA(2, 128),
++	MHI_EVENT_CONFIG_SW_DATA(3, 64),
++	MHI_EVENT_CONFIG_SW_DATA(4, 64),
++	MHI_EVENT_CONFIG_HW_DATA(5, 1024, 100),
++	MHI_EVENT_CONFIG_HW_DATA(6, 2048, 101),
++};
++
++static const struct mhi_controller_config modem_qcom_sdx55_mhiv_config = {
++	.max_channels = 128,
++	.timeout_ms = 60000,
++	.num_channels = ARRAY_SIZE(modem_qcom_sdx55_mhi_channels),
++	.ch_cfg = modem_qcom_sdx55_mhi_channels,
++	.num_events = ARRAY_SIZE(modem_qcom_sdx55_mhi_events),
++	.event_cfg = modem_qcom_sdx55_mhi_events,
++};
++
+ static const struct mhi_pci_dev_info mhi_qcom_sdx55_info = {
+ 	.name = "qcom-sdx55m",
+ 	.fw = "qcom/sdx55m/sbl1.mbn",
+ 	.edl = "qcom/sdx55m/edl.mbn",
+ 	.edl_trigger = true,
+-	.config = &modem_qcom_v1_mhiv_config,
++	.config = &modem_qcom_sdx55_mhiv_config,
+ 	.bar_num = MHI_PCI_DEFAULT_BAR_NUM,
+ 	.dma_data_width = 32,
+ 	.mru_default = 32768,
+-	.sideband_wake = false,
++	.sideband_wake = true,
++	.no_m3 = true,
+ };
+ 
+ static const struct mhi_pci_dev_info mhi_qcom_sdx35_info = {
+@@ -1384,6 +1428,15 @@ static int mhi_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+ {
+ 	const struct mhi_pci_dev_info *info = (struct mhi_pci_dev_info *) id->driver_data;
+ 	const struct mhi_controller_config *mhi_cntrl_config;
++
++	/*
++	 * Qualcomm flashless SDX55M on SM8250 boards reports subsystem 17cb:010c
++	 * in PBL/BHI, colliding with the flash-equipped Foxconn SDX55 M.2 entry.
++	 */
++	if (info == &mhi_foxconn_sdx55_info &&
++	    (of_machine_is_compatible("qcom,sm8250") ||
++	     of_machine_is_compatible("qcom,kona")))
++		info = &mhi_qcom_sdx55_info;
+ 	struct mhi_pci_device *mhi_pdev;
+ 	struct mhi_controller *mhi_cntrl;
+ 	unsigned int dma_data_width;
+diff --git a/drivers/net/wwan/mhi_wwan_ctrl.c b/drivers/net/wwan/mhi_wwan_ctrl.c
+index 772319927..be7c80702 100644
+--- a/drivers/net/wwan/mhi_wwan_ctrl.c
++++ b/drivers/net/wwan/mhi_wwan_ctrl.c
+@@ -496,6 +496,8 @@ static const struct mhi_device_id mhi_wwan_ctrl_match_table[] = {
+ 	{ .chan = "DIAG", .driver_data = WWAN_PORT_QCDM },
+ 	{ .chan = "FIREHOSE", .driver_data = WWAN_PORT_FIREHOSE },
+ 	{ .chan = "NMEA", .driver_data = WWAN_PORT_NMEA },
++	{ .chan = "SAHARA", .driver_data = WWAN_PORT_SAHARA },
++	{ .chan = "EFS", .driver_data = WWAN_PORT_EFS },
+ 	{},
+ };
+ MODULE_DEVICE_TABLE(mhi, mhi_wwan_ctrl_match_table);
+diff --git a/drivers/net/wwan/wwan_core.c b/drivers/net/wwan/wwan_core.c
+index 7097b58da..ae38aba86 100644
+--- a/drivers/net/wwan/wwan_core.c
++++ b/drivers/net/wwan/wwan_core.c
+@@ -353,6 +353,14 @@ static const struct {
+ 		.devsuf = "mipc",
+ 	},
+ 	/* WWAN_PORT_NMEA is exported via the GNSS subsystem */
++	[WWAN_PORT_SAHARA] = {
++		.name = "SAHARA",
++		.devsuf = "sahara",
++	},
++	[WWAN_PORT_EFS] = {
++		.name = "EFS",
++		.devsuf = "efs",
++	},
+ };
+ 
+ static ssize_t type_show(struct device *dev, struct device_attribute *attr,
+diff --git a/include/linux/wwan.h b/include/linux/wwan.h
+index 23a8a8ee4..3a01b10f6 100644
+--- a/include/linux/wwan.h
++++ b/include/linux/wwan.h
+@@ -20,6 +20,7 @@
+  * @WWAN_PORT_ADB: ADB protocol control
+  * @WWAN_PORT_MIPC: MTK MIPC diagnostic interface
+  * @WWAN_PORT_NMEA: embedded GNSS receiver with NMEA output
++ * @WWAN_PORT_SAHARA: Qcom Sahara firmware download protocol
+  *
+  * @WWAN_PORT_MAX: Highest supported port types
+  * @WWAN_PORT_UNKNOWN: Special value to indicate an unknown port type
+@@ -36,6 +37,8 @@ enum wwan_port_type {
+ 	WWAN_PORT_ADB,
+ 	WWAN_PORT_MIPC,
+ 	WWAN_PORT_NMEA,
++	WWAN_PORT_SAHARA,
++	WWAN_PORT_EFS,
+ 
+ 	/* Add new port types above this line */
+ 
+-- 
+2.43.0
+

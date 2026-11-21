@@ -3,7 +3,7 @@
 - **Device**: realme GT Neo 2 (`RMX3370`, codename `bitra`, OPLUS project `21619` / `0x5473`)
 - **SoC**: Qualcomm SM8250-AC (`kona v2.1`), 12 GiB RAM, 256 GiB UFS 3.1 (A-only, `boot` 96 MiB, `userdata` = `/dev/sda11` ~226.5 GiB)
 - **Target**: Headless 24/7 ARM64 Ubuntu 24.04.5 LTS Server (single-OS on `sda11`, GPT untouched)
-- **Kernel**: Mainline Linux `7.4.0-rc3-bitra5` (`kernel/` branch `rmx3370-mainline`, commit `5f3199e3a`)
+- **Kernel**: Mainline Linux `7.4.0-rc3-bitra9` (`kernel/` branch `rmx3370-mainline`, commit `833b48fde`)
 
 ## Milestone Status
 
@@ -19,4 +19,5 @@
 | 6.3 | 2S Charger + 24/7 Anti-Swelling Control (`MPS MP2650`) | **Done (flashed & cold-boot verified)** | Clean mainline `drivers/power/supply/mp2650_charger.c` on `i2c5@0x5c` with `charge_behaviour` (`auto`, `inhibit-charge` USB bypass, `force-discharge` HIZ) + `bitra-charge-limit.timer` (`55%–75%` band, drain above `80%`, fail-safe `<20%`) |
 | 6.4 | True Hardware OLED Power-Off | **Done (flashed & cold-boot verified)** | `vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15` marked `regulator-boot-on` (no `always-on`) so `regulator_late_cleanup` sends RPMh `ENABLE=0` |
 | 6.5 | USB Host/OTG + Type-C + SM8250-AC 3.1872 GHz OPP | **Done (flashed & cold-boot verified; external USB drive tested OK)** | `pm8150b_typec` dual-role + `usb_1_dwc3` `dr_mode=otg` + MP2650 5V OTG VBUS boost regulator + `cpu7` 3.1872 GHz OPP verified live |
-| P1.5 | Built-in SDX55M SMS (`mhi_pci_generic` + `tqftpserv` + `ModemManager`) | **Planned** | After Server MVP flash & Wi-Fi validation |
+| P1.5 | Built-in SDX55M 5G Modem + SMS (`mhi_pci_generic` + Sahara + EFS Sync + `tqftpserv-sdx55` + `ModemManager`) | **Done (flashed & cold-boot verified in `bitra9`)** | PCIe2 Gen3 x2 + GICv3-MBI (0 SMMU faults) + `ap2mdm_status` GPIO v2 + Sahara v2 auto-load + continuous Sahara EFS Sync (`/dev/wwan0efs0` -> local RW copy, raw UFS untouched) + QRTR TFTP (`Service 4096` v1..10) + live cellular registration & `mmcli` SMS ready |
+| Extra | Docker `iptables-nft` + DNS `dns=default` | **Done (flashed & cold-boot verified in `bitra9`)** | `CONFIG_NFT_COMPAT` + `XT_NAT` + `IP_NF_*` (`dockerd 29.10` container bridge networking verified) + NetworkManager `dns=default` |

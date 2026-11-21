@@ -18,7 +18,7 @@ mkdir -p \
   "$STAGE/etc/systemd/sleep.conf.d" \
   "$STAGE/etc/systemd/logind.conf.d" \
   "$STAGE/etc/ssh/sshd_config.d" \
-  "$STAGE/etc/chrony/conf.d" "$STAGE/etc/NetworkManager/conf.d" "$STAGE/etc/udev/rules.d" \
+  "$STAGE/etc/chrony/conf.d" "$STAGE/etc/NetworkManager/conf.d" "$STAGE/etc/udev/rules.d" "$STAGE/etc/default" \
   "$STAGE/usr/lib/bitra" \
   "$STAGE/usr/sbin"
 
@@ -222,6 +222,13 @@ cat > "$STAGE/etc/NetworkManager/conf.d/10-bitra-unmanaged-usb0.conf" << "NM"
 unmanaged-devices=interface-name:usb0
 NM
 
+
+# 7c. Ensure NetworkManager writes real DHCP DNS directly into /etc/resolv.conf (no systemd-resolved)
+cat > "$STAGE/etc/NetworkManager/conf.d/10-bitra-dns-default.conf" << "NMDNS"
+[main]
+dns=default
+NMDNS
+
 # 8. Allow chrony to step clock from 1970 RTC on boot
 cat > "$STAGE/etc/chrony/conf.d/10-bitra-rtc.conf" << "CHRONY"
 makestep 1.0 -1
@@ -326,6 +333,528 @@ AccuracySec=10s
 WantedBy=timers.target
 CLTMR
 
+
+# 11. External SDX55M 5G Modem suite (GPIO + Sahara v2 + EFS Sync + QRTR TFTP + optional SIM slot init)
+cat > "$STAGE/etc/udev/rules.d/99-bitra-sdx55-sahara.rules" << "SDXUDEV"
+SUBSYSTEM=="wwan", KERNEL=="wwan*sahara*", ENV{ID_MM_PORT_IGNORE}="1"
+SUBSYSTEM=="wwan", KERNEL=="wwan*efs*", ENV{ID_MM_PORT_IGNORE}="1"
+SUBSYSTEM=="wwan", KERNEL=="wwan*qmi*", ENV{ID_MM_PORT_IGNORE}="1"
+SDXUDEV
+
+cat > "$STAGE/etc/default/bitra-sdx55" << "SDXDEF"
+# Optional SDX55M initial SIM slot selection before ModemManager starts.
+# Leave empty to keep modem default (Slot 1 / SUB1), or set SIM_SLOT=2 for Slot 2 (SUB2).
+SIM_SLOT=""
+SDXDEF
+
+cat > "$STAGE/usr/sbin/bitra-sdx55-gpio.py" << "SDXGPIO"
+#!/usr/bin/env python3
+"""Read/set SM8250 TLMM GPIOs via Linux GPIO cdev ABI v2 (zero external deps)."""
+import fcntl, os, struct, sys, time
+
+GPIO_V2_GET_LINE_IOCTL = 0xC250B407
+GPIO_V2_LINE_GET_VALUES_IOCTL = 0xC010B40E
+GPIO_V2_LINE_SET_VALUES_IOCTL = 0xC010B40F
+FLAG_INPUT  = 1 << 2
+FLAG_OUTPUT = 1 << 3
+
+def find_tlmm_chip():
+    for i in range(8):
+        p = f"/sys/bus/gpio/devices/gpiochip{i}/of_node/compatible"
+        try:
+            if "qcom,sm8250-pinctrl" in open(p, "rb").read().decode("ascii", "ignore"):
+                return f"/dev/gpiochip{i}"
+        except OSError:
+            pass
+    return "/dev/gpiochip3"
+
+def req_lines(chip, offsets, flags, consumer=b"bitra-mdm"):
+    buf = bytearray(592)
+    for i, off in enumerate(offsets):
+        struct.pack_into("<I", buf, i * 4, off)
+    buf[256:256+len(consumer)] = consumer
+    struct.pack_into("<Q", buf, 288, flags)
+    struct.pack_into("<I", buf, 560, len(offsets))
+    cfd = os.open(chip, os.O_RDWR)
+    try:
+        fcntl.ioctl(cfd, GPIO_V2_GET_LINE_IOCTL, buf)
+    finally:
+        os.close(cfd)
+    return struct.unpack_from("<i", buf, 588)[0]
+
+def get_vals(lfd, n):
+    buf = bytearray(16)
+    struct.pack_into("<QQ", buf, 0, 0, (1 << n) - 1)
+    fcntl.ioctl(lfd, GPIO_V2_LINE_GET_VALUES_IOCTL, buf)
+    bits = struct.unpack_from("<Q", buf, 0)[0]
+    return [(bits >> i) & 1 for i in range(n)]
+
+def set_vals(lfd, vals):
+    bits = 0
+    for i, v in enumerate(vals):
+        if v: bits |= (1 << i)
+    buf = bytearray(struct.pack("<QQ", bits, (1 << len(vals)) - 1))
+    fcntl.ioctl(lfd, GPIO_V2_LINE_SET_VALUES_IOCTL, buf)
+
+chip = find_tlmm_chip()
+cmd = sys.argv[1] if len(sys.argv) > 1 else "read"
+if cmd == "read":
+    lfd = req_lines(chip, [1, 3], FLAG_INPUT)
+    v = get_vals(lfd, 2)
+    os.close(lfd)
+    print(f"mdm2ap_errfatal(1)={v[0]} mdm2ap_status(3)={v[1]} ({chip})")
+elif cmd == "hold":
+    lfd = req_lines(chip, [56, 57], FLAG_OUTPUT)
+    set_vals(lfd, [1, 0])
+    print(f"ap2mdm_status(56)=1 ap2mdm_errfatal(57)=0 HELD ({chip})", flush=True)
+    while True:
+        time.sleep(60)
+SDXGPIO
+chmod 755 "$STAGE/usr/sbin/bitra-sdx55-gpio.py"
+
+cat > "$STAGE/usr/sbin/bitra-sdx55-sahara.py" << "SDXSAH"
+#!/usr/bin/env python3
+"""Minimal Qualcomm Sahara v2 image loader for flashless SDX55M over /dev/wwan0sahara0."""
+import errno, os, select, struct, sys, time
+
+DEV_PATH = sys.argv[1] if len(sys.argv) > 1 else "/dev/wwan0sahara0"
+FW_DIR = "/lib/firmware/updates/qcom/sdx55m"
+EFS_RW_DIR = "/var/lib/bitra/sdx55m-efs-rw"
+EFS_RO_DIR = "/var/lib/bitra/sdx55m-efs"
+MAX_CHUNK = 16384
+
+def efs_path(name):
+    rw = os.path.join(EFS_RW_DIR, name)
+    if os.path.isfile(rw) and os.path.getsize(rw) > 0:
+        return rw
+    return os.path.join(EFS_RO_DIR, name)
+
+def build_image_table():
+    return {
+        6:  f"{FW_DIR}/apps.mbn",
+        8:  f"{FW_DIR}/qdsp6sw.mbn",
+        16: efs_path("mdm1m9kefs1.bin"),
+        17: efs_path("mdm1m9kefs2.bin"),
+        20: efs_path("mdm1m9kefs3.bin"),
+        21: f"{FW_DIR}/sbl1.mbn",
+        23: f"{FW_DIR}/aop.mbn",
+        25: f"{FW_DIR}/tz.mbn",
+        29: f"{FW_DIR}/acdb.mbn",
+        33: f"{FW_DIR}/hyp.mbn",
+        34: efs_path("mdmddr.bin"),
+        36: f"{FW_DIR}/multi_image_qti.mbn",
+        37: f"{FW_DIR}/multi_image.mbn",
+        38: f"{FW_DIR}/xbl_cfg.elf",
+        40: f"{FW_DIR}/apdp.mbn",
+        41: f"{FW_DIR}/devcfg.mbn",
+        42: f"{FW_DIR}/sec.elf",
+    }
+
+CMD_HELLO, CMD_HELLO_RESP, CMD_READ_DATA, CMD_END_OF_IMAGE, CMD_DONE, CMD_DONE_RESP = 1, 2, 3, 4, 5, 6
+CMD_MEM_DEBUG, CMD_MEM_DEBUG64, CMD_READ_DATA64 = 0x09, 0x10, 0x12
+
+def log(msg):
+    print(f"[sahara {time.monotonic():.3f}] {msg}", flush=True)
+
+def write_all(fd, data):
+    view = memoryview(data)
+    off = 0
+    total = len(data)
+    while off < total:
+        chunk = view[off:off + MAX_CHUNK]
+        while True:
+            _, w, _ = select.select([], [fd], [], 10.0)
+            if not w:
+                raise TimeoutError("write timeout")
+            try:
+                n = os.write(fd, chunk)
+                break
+            except BlockingIOError:
+                continue
+        if n <= 0:
+            raise OSError(errno.EIO, "short write")
+        off += n
+
+def main():
+    if not os.path.isfile(f"{FW_DIR}/qdsp6sw.mbn"):
+        log("SDX55M firmware not extracted yet (run bitra-extract-sdx55-fw); skipping.")
+        return 0
+    image_table = build_image_table()
+    log(f"Opening {DEV_PATH}")
+    fd = os.open(DEV_PATH, os.O_RDWR | os.O_NONBLOCK)
+    open_files = {}
+    last_img = None
+    bytes_sent = {}
+    try:
+        while True:
+            r, _, _ = select.select([fd], [], [], 10.0)
+            if not r:
+                log(f"TIMEOUT waiting for read (last_img={last_img})")
+                return 10
+            try:
+                pkt = os.read(fd, 32768)
+            except BlockingIOError:
+                continue
+            except OSError as e:
+                log(f"read error (device likely switched EE): {e}")
+                break
+            if not pkt:
+                log("EOF on sahara device")
+                break
+            if len(pkt) < 8:
+                continue
+            cmd, length = struct.unpack_from("<II", pkt, 0)
+            if cmd == CMD_HELLO:
+                ver, ver_min, max_pkt, mode = struct.unpack_from("<IIII", pkt, 8)
+                log(f"HELLO ver={ver} min={ver_min} max_pkt={max_pkt} mode={mode}")
+                resp = struct.pack("<IIIIII6I", CMD_HELLO_RESP, 0x30, 2, 1, 0, mode, 0,0,0,0,0,0)
+                write_all(fd, resp)
+            elif cmd in (CMD_READ_DATA, CMD_READ_DATA64):
+                if cmd == CMD_READ_DATA:
+                    img_id, offset, data_len = struct.unpack_from("<III", pkt, 8)
+                else:
+                    img_id, offset, data_len = struct.unpack_from("<QQQ", pkt, 8)
+                path = image_table.get(img_id)
+                if not path or not os.path.exists(path):
+                    log(f"ERROR: missing img={img_id} path={path}")
+                    return 2
+                if img_id != last_img:
+                    log(f"Serving img={img_id} ({os.path.basename(path)}, size={os.path.getsize(path)})")
+                    last_img = img_id
+                f = open_files.get(img_id)
+                if f is None:
+                    f = open(path, "rb")
+                    open_files[img_id] = f
+                f.seek(offset)
+                data = f.read(data_len)
+                if len(data) < data_len:
+                    data += b"\x00" * (data_len - len(data))
+                write_all(fd, data)
+                bytes_sent[img_id] = bytes_sent.get(img_id, 0) + data_len
+            elif cmd == CMD_END_OF_IMAGE:
+                img_id, status = struct.unpack_from("<II", pkt, 8)
+                log(f"END_OF_IMAGE img={img_id} status={status} sent={bytes_sent.get(img_id, 0)}")
+                if img_id in open_files:
+                    open_files.pop(img_id).close()
+                if status != 0:
+                    return 3
+                write_all(fd, struct.pack("<II", CMD_DONE, 8))
+            elif cmd == CMD_DONE_RESP:
+                tx_status = struct.unpack_from("<I", pkt, 8)[0]
+                log(f"DONE_RESP image_tx_status={tx_status}")
+                if tx_status == 1:
+                    log("SUCCESS: All images loaded! SDX55M booting AMSS!")
+                    return 0
+            elif cmd in (CMD_MEM_DEBUG, CMD_MEM_DEBUG64):
+                log(f"WARNING: MEM_DEBUG cmd=0x{cmd:x} len={length}")
+                return 4
+            else:
+                log(f"UNHANDLED cmd=0x{cmd:x} len={length}")
+                return 5
+    finally:
+        for f in open_files.values():
+            f.close()
+        os.close(fd)
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())
+SDXSAH
+chmod 755 "$STAGE/usr/sbin/bitra-sdx55-sahara.py"
+
+cat > "$STAGE/usr/sbin/bitra-sdx55-efs-sync.py" << "SDXEFS"
+#!/usr/bin/env python3
+"""Qualcomm Sahara EFS Sync daemon for SDX55M over /dev/wwan0efs0 (MHI ch 10/11).
+Writes synced EFS copies safely to /var/lib/bitra/sdx55m-efs-rw/ without touching raw UFS."""
+import errno, os, select, struct, sys, time
+
+DEV_PATH = sys.argv[1] if len(sys.argv) > 1 else "/dev/wwan0efs0"
+EFS_RW_DIR = "/var/lib/bitra/sdx55m-efs-rw"
+CMD_HELLO, CMD_HELLO_RESP, CMD_END_OF_IMAGE, CMD_DONE, CMD_DONE_RESP = 1, 2, 4, 5, 6
+CMD_RESET, CMD_RESET_RESP, CMD_MEM_DEBUG, CMD_MEM_READ, CMD_MEM_DEBUG64, CMD_MEM_READ64 = 7, 8, 9, 10, 16, 17
+
+FILENAME_MAP = {
+    "m9kefs1": "mdm1m9kefs1.bin",
+    "m9kefs2": "mdm1m9kefs2.bin",
+    "m9kefs3": "mdm1m9kefs3.bin",
+    "m9kefsc": "mdm1m9kefsc.bin",
+    "mdm1m9kefs1": "mdm1m9kefs1.bin",
+    "mdm1m9kefs2": "mdm1m9kefs2.bin",
+    "mdm1m9kefs3": "mdm1m9kefs3.bin",
+    "mdm1m9kefsc": "mdm1m9kefsc.bin",
+}
+
+def log(msg):
+    print(f"[efs-sync {time.monotonic():.3f}] {msg}", flush=True)
+
+def write_all(fd, data):
+    view = memoryview(data)
+    off = 0
+    while off < len(data):
+        _, w, _ = select.select([], [fd], [], 10.0)
+        if not w: raise TimeoutError("write timeout")
+        try: n = os.write(fd, view[off:off + 16384])
+        except BlockingIOError: continue
+        if n <= 0: raise OSError(errno.EIO, "short write")
+        off += n
+
+def read_exact(fd, n, timeout=15.0):
+    buf = bytearray()
+    dl = time.monotonic() + timeout
+    while len(buf) < n:
+        rem = dl - time.monotonic()
+        if rem <= 0: raise TimeoutError(f"read_exact({n}) got {len(buf)}")
+        r, _, _ = select.select([fd], [], [], rem)
+        if not r: raise TimeoutError(f"read_exact({n}) timeout got {len(buf)}")
+        try: c = os.read(fd, min(32768, n - len(buf)))
+        except BlockingIOError: continue
+        if not c: raise EOFError()
+        buf.extend(c)
+    return bytes(buf)
+
+def mem_read(fd, addr, length, is64):
+    if is64: write_all(fd, struct.pack("<IIQQ", CMD_MEM_READ64, 24, addr, length))
+    else: write_all(fd, struct.pack("<IIII", CMD_MEM_READ, 16, addr, length))
+    return read_exact(fd, length, 15.0)
+
+def safe_target_path(raw_name):
+    base = os.path.basename(raw_name.strip().replace("\\", "/"))
+    mapped = FILENAME_MAP.get(base, base)
+    if not mapped or mapped in (".", ".."): mapped = "unknown_efs.bin"
+    return os.path.join(EFS_RW_DIR, mapped)
+
+def serve_device(dev_path):
+    log(f"Opening {dev_path}")
+    fd = os.open(dev_path, os.O_RDWR | os.O_NONBLOCK)
+    try:
+        while True:
+            r, _, _ = select.select([fd], [], [], 30.0)
+            if not r:
+                if not os.path.exists(dev_path):
+                    log("Device disappeared")
+                    return
+                continue
+            try: pkt = os.read(fd, 32768)
+            except BlockingIOError: continue
+            except OSError as e:
+                log(f"Read error: {e}")
+                return
+            if not pkt or len(pkt) < 8:
+                return
+            cmd, length = struct.unpack_from("<II", pkt, 0)
+            if cmd == CMD_HELLO:
+                ver, vmin, mpkt, mode = struct.unpack_from("<IIII", pkt, 8)
+                log(f"HELLO ver={ver} mode={mode}")
+                write_all(fd, struct.pack("<IIIIII6I", CMD_HELLO_RESP, 0x30, 2, 1, 0, mode, 0,0,0,0,0,0))
+            elif cmd in (CMD_MEM_DEBUG, CMD_MEM_DEBUG64):
+                is64 = (cmd == CMD_MEM_DEBUG64)
+                taddr, tlen = struct.unpack_from("<QQ" if is64 else "<II", pkt, 8)
+                tbl = mem_read(fd, taddr, tlen, is64)
+                rsz = 64 if is64 else 52
+                entries = []
+                for o in range(0, len(tbl) - rsz + 1, rsz):
+                    sv, addr, sz, desc, fn = struct.unpack_from("<QQQ20s20s" if is64 else "<III20s20s", tbl, o)
+                    fn = fn.split(b"\x00", 1)[0].decode("ascii", "replace")
+                    if fn and sz > 0:
+                        entries.append((fn, addr, sz))
+                for fn, addr, sz in entries:
+                    t0 = time.monotonic()
+                    buf = bytearray()
+                    pos = 0
+                    while pos < sz:
+                        cl = min(16384, sz - pos)
+                        buf.extend(mem_read(fd, addr + pos, cl, is64))
+                        pos += cl
+                    outp = safe_target_path(fn)
+                    tmpp = outp + ".tmp"
+                    with open(tmpp, "wb") as f:
+                        f.write(buf)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmpp, outp)
+                    log(f"SYNCED {fn} -> {outp} ({len(buf)}B in {(time.monotonic()-t0)*1000:.0f}ms)")
+                write_all(fd, struct.pack("<II", CMD_RESET, 8))
+            elif cmd == CMD_RESET_RESP:
+                log("EFS sync cycle complete")
+            elif cmd == CMD_END_OF_IMAGE:
+                write_all(fd, struct.pack("<II", CMD_DONE, 8))
+            elif cmd == CMD_DONE_RESP:
+                pass
+            else:
+                log(f"UNHANDLED cmd=0x{cmd:x} len={length}")
+    finally:
+        os.close(fd)
+
+def main():
+    os.makedirs(EFS_RW_DIR, exist_ok=True)
+    while True:
+        if not os.path.exists(DEV_PATH):
+            time.sleep(0.5)
+            continue
+        try: serve_device(DEV_PATH)
+        except Exception as e: log(f"Exception: {e}")
+        time.sleep(0.5)
+
+if __name__ == "__main__":
+    sys.exit(main())
+SDXEFS
+chmod 755 "$STAGE/usr/sbin/bitra-sdx55-efs-sync.py"
+
+cat > "$STAGE/usr/sbin/bitra-sdx55-sim-init.py" << "SDXSIM"
+#!/usr/bin/env python3
+"""Optional pre-ModemManager SIM slot selector for SDX55M (/etc/default/bitra-sdx55)."""
+import os, select, sys, time
+
+slot = os.environ.get("SIM_SLOT", "").strip()
+if slot not in ("1", "2"):
+    sys.exit(0)
+
+dev = "/dev/wwan0at0"
+for _ in range(40):
+    if os.path.exists(dev):
+        break
+    time.sleep(0.5)
+if not os.path.exists(dev):
+    sys.exit(0)
+
+time.sleep(3.0)
+fd = os.open(dev, os.O_RDWR | os.O_NONBLOCK)
+try:
+    def at(cmd, wait=2.0):
+        os.write(fd, (cmd + "\r").encode())
+        dl = time.monotonic() + wait
+        out = b""
+        while time.monotonic() < dl:
+            r, _, _ = select.select([fd], [], [], max(0.05, dl - time.monotonic()))
+            if r:
+                try: out += os.read(fd, 4096)
+                except BlockingIOError: pass
+                if b"\r\nOK\r\n" in out or b"ERROR" in out: break
+        return out.decode("ascii", "replace").strip()
+
+    idx = int(slot) - 1
+    print(f"[sim-init] Selecting SIM_SLOT={slot} (AT$QCSIMAPP={idx}): {at(f'AT$QCSIMAPP={idx}')}", flush=True)
+    print(f"[sim-init] AT+CFUN=1: {at('AT+CFUN=1', 3.0)}", flush=True)
+finally:
+    os.close(fd)
+SDXSIM
+chmod 755 "$STAGE/usr/sbin/bitra-sdx55-sim-init.py"
+
+cat > "$STAGE/usr/sbin/bitra-extract-sdx55-fw" << "SDXEXT"
+#!/bin/bash
+# Safe, read-only on-device extractor for RMX3370 SDX55M firmware, MCFG, and EFS snapshot.
+set -euo pipefail
+MODEM_PART=$(readlink -f /dev/disk/by-partlabel/modem)
+MNT=$(mktemp -d /tmp/bitra-modem-mnt.XXXXXX)
+trap 'umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true' EXIT
+
+mount -o ro "$MODEM_PART" "$MNT"
+mkdir -p /lib/firmware/updates/qcom/sdx55m /lib/firmware/modem_pr /var/lib/bitra/sdx55m-efs /var/lib/bitra/sdx55m-efs-rw /var/lib/tqftpserv/{readwrite,shared,hlos}
+cp -a "$MNT/image/sdx55m/." /lib/firmware/updates/qcom/sdx55m/
+cp -a "$MNT/image/modem_pr/." /lib/firmware/modem_pr/
+
+for part in mdm1m9kefs1 mdm1m9kefs2 mdm1m9kefs3 mdmddr; do
+  DEV=$(readlink -f "/dev/disk/by-partlabel/$part")
+  dd if="$DEV" of="/var/lib/bitra/sdx55m-efs/${part}.bin" bs=1M status=none
+  chmod 600 "/var/lib/bitra/sdx55m-efs/${part}.bin"
+  [ -f "/var/lib/bitra/sdx55m-efs-rw/${part}.bin" ] || cp -a "/var/lib/bitra/sdx55m-efs/${part}.bin" "/var/lib/bitra/sdx55m-efs-rw/${part}.bin"
+done
+echo "[bitra-sdx55] Extracted SDX55M firmware, modem_pr, and read-only EFS snapshot successfully."
+SDXEXT
+chmod 755 "$STAGE/usr/sbin/bitra-extract-sdx55-fw"
+
+if [ -x "$WS/out/tqftpserv-sdx55" ]; then
+  cp "$WS/out/tqftpserv-sdx55" "$STAGE/usr/sbin/tqftpserv-sdx55"
+  chmod 755 "$STAGE/usr/sbin/tqftpserv-sdx55"
+fi
+
+cat > "$STAGE/etc/systemd/system/bitra-ap2mdm-gpio.service" << "SDXUNIT1"
+[Unit]
+Description=Assert AP2MDM status GPIO for SDX55M modem
+DefaultDependencies=no
+After=systemd-udevd.service
+Before=bitra-sdx55-sahara.service multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/sbin/bitra-sdx55-gpio.py hold
+Restart=always
+TimeoutStopSec=5
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+SDXUNIT1
+
+cat > "$STAGE/etc/systemd/system/tqftpserv-sdx55.service" << "SDXUNIT2"
+[Unit]
+Description=QRTR TFTP service for SDX55M (Service 4096 versions 1..10)
+After=local-fs.target
+Before=bitra-sdx55-sahara.service
+ConditionPathExists=/usr/sbin/tqftpserv-sdx55
+
+[Service]
+Type=simple
+ExecStartPre=/bin/mkdir -p /var/lib/tqftpserv/readwrite /var/lib/tqftpserv/shared /var/lib/tqftpserv/hlos
+ExecStart=/usr/sbin/tqftpserv-sdx55
+Restart=always
+TimeoutStopSec=5
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+SDXUNIT2
+
+cat > "$STAGE/etc/systemd/system/bitra-sdx55-sahara.service" << "SDXUNIT3"
+[Unit]
+Description=Qualcomm Sahara v2 firmware loader for SDX55M
+After=systemd-udevd.service local-fs.target bitra-ap2mdm-gpio.service tqftpserv-sdx55.service
+Wants=bitra-ap2mdm-gpio.service tqftpserv-sdx55.service
+Before=ModemManager.service
+ConditionPathExists=/lib/firmware/updates/qcom/sdx55m/qdsp6sw.mbn
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for i in $(seq 1 40); do [ -e /dev/wwan0sahara0 ] && break; sleep 0.5; done; [ -e /dev/wwan0sahara0 ] && exec /usr/bin/python3 /usr/sbin/bitra-sdx55-sahara.py /dev/wwan0sahara0 || exit 0'
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target
+SDXUNIT3
+
+cat > "$STAGE/etc/systemd/system/bitra-sdx55-efs-sync.service" << "SDXUNIT4"
+[Unit]
+Description=Qualcomm Sahara EFS Sync daemon for SDX55M (/dev/wwan0efs0)
+After=bitra-sdx55-sahara.service
+ConditionPathExists=/lib/firmware/updates/qcom/sdx55m/qdsp6sw.mbn
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/sbin/bitra-sdx55-efs-sync.py /dev/wwan0efs0
+Restart=always
+TimeoutStopSec=5
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+SDXUNIT4
+
+cat > "$STAGE/etc/systemd/system/bitra-sdx55-sim-init.service" << "SDXUNIT5"
+[Unit]
+Description=Optional SDX55M SIM slot selector before ModemManager
+After=bitra-sdx55-sahara.service
+Before=ModemManager.service
+ConditionPathExists=/lib/firmware/updates/qcom/sdx55m/qdsp6sw.mbn
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/bitra-sdx55
+ExecStart=/usr/bin/python3 /usr/sbin/bitra-sdx55-sim-init.py
+
+[Install]
+WantedBy=multi-user.target
+SDXUNIT5
+
 cat > "$STAGE/DEBIAN/control" << CTRL
 Package: bitra-device-support
 Version: $VER
@@ -347,6 +876,11 @@ if [ -d /etc/systemd/system/multi-user.target.wants ]; then
   ln -sf /etc/systemd/system/bitra-usb-gadget.service /etc/systemd/system/multi-user.target.wants/bitra-usb-gadget.service
   mkdir -p /etc/systemd/system/timers.target.wants
   ln -sf /etc/systemd/system/bitra-charge-limit.timer /etc/systemd/system/timers.target.wants/bitra-charge-limit.timer
+  ln -sf /etc/systemd/system/bitra-ap2mdm-gpio.service /etc/systemd/system/multi-user.target.wants/bitra-ap2mdm-gpio.service
+  ln -sf /etc/systemd/system/tqftpserv-sdx55.service /etc/systemd/system/multi-user.target.wants/tqftpserv-sdx55.service
+  ln -sf /etc/systemd/system/bitra-sdx55-sahara.service /etc/systemd/system/multi-user.target.wants/bitra-sdx55-sahara.service
+  ln -sf /etc/systemd/system/bitra-sdx55-efs-sync.service /etc/systemd/system/multi-user.target.wants/bitra-sdx55-efs-sync.service
+  ln -sf /etc/systemd/system/bitra-sdx55-sim-init.service /etc/systemd/system/multi-user.target.wants/bitra-sdx55-sim-init.service
 fi
 exit 0
 POST
