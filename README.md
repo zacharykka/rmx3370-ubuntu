@@ -6,14 +6,14 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 - **[Build, Package & Flash Guide](docs/build-and-flash.md)** — Complete step-by-step instructions from upstream Linux source to cold-booting Ubuntu 24.04.5 LTS Server, Wi-Fi 6 setup, anti-swelling charge control, and recovery.
 - **[Bring-Up Pitfalls & Debugging Notes](docs/pitfalls-and-debugging.md)** — Every real RMX3370 hardware/bootloader/initramfs pitfall hit during development (with root causes, `pstore` evidence, and exact fixes).
 - **[Hardware & Milestone Status](docs/status.md)** — Live bring-up checklist and verified hardware capabilities.
-- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra13`).
+- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra14`).
 - **[Technical Debt Tracker](docs/tech-debt.md)** — Known temporary workarounds and exit criteria.
 
-## Verified Working Hardware (`7.4.0-rc3-bitra13` + `bitra-device-support 1.2`)
+## Verified Working Hardware (`7.4.0-rc3-bitra14` + `bitra-device-support 1.3`)
 
 | Subsystem | Hardware / Driver | Status | Notes |
 |---|---|---|---|
-| SoC / CPU / CPUfreq | SM8250-AC 8x Kryo 485 (`qcom-cpufreq-hw`) | **Working** | 3 clusters (`0.30–1.80`, `0.71–2.42`, `0.84–3.19 GHz`), 25 thermal zones, zero boot-crutch cmdline flags |
+| SoC / CPU / CPUfreq & Idle | SM8250-AC 8x Kryo 485 (`qcom-cpufreq-hw` + PSCI OSI) | **Working** | 3 clusters (`0.30–1.80`, `0.71–2.42`, `0.84–3.19 GHz`), PSCI deep idle (`cpu-sleep-0-0` / `cpu-sleep-1-0`) active on all 8 cores, 25 thermal zones, zero boot-crutch cmdline flags |
 | RAM & Swap | 12 GiB LPDDR5 + `zram0` (LZ4) | **Working** | Exact 22-region RMX3370 `reserved-memory` map |
 | Storage | Samsung UFS 3.1 (`1d84000.ufshc`) | **Working** | All 6 LUNs (`sda`–`sdf`); `/dev/sda11` (`222 GiB` ext4 `LABEL=ubuntu-root`), GPT untouched |
 | USB Management Net | `a600000.usb` CDC-ECM (`usb0`) | **Working** | Static `192.168.2.15/24` + `dnsmasq` (`--bind-dynamic --dhcp-authoritative`), `bmAttributes=0xe0`, `u_ether` suspend/TX-queue fix, DWC3 USB2 LPM disabled, `bitra-usb-watch` auto-recovery |
@@ -28,6 +28,8 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | Stereo Speakers & Mics | `ADSP` (`pd-mapper`) + Dual NXP `TFA9874` (`i2c15@0x34/0x35`) + `WCD9380` (`SoundWire`) | **Working** | Native stereo speakers (`TERTIARY_MI2S_RX` `gpio137`), dual analog mics (`AMIC1`+`AMIC5`), ALSA UCM2 + PipeWire + Phosh volume OSD |
 | Linear Haptics Motor | Awinic `AW8697` 0815 X-Axis LRA (`i2c11@0x5a`, 170 Hz) | **Working** | Clean mainline `aw8697.c` force-feedback (`EV_FF` / `FF_RUMBLE`) + `FEEDBACKD_TYPE=vibra` udev rule (`feedbackd`) |
 | Onboard Sensors (6/6) | Qualcomm `SLPI` + `SMEM_SENSOR` + `hexagonrpcd` + `libssc` + `iio-sensor-proxy` | **Working** | Accelerometer & Gyroscope (`icm4x6xa`), Magnetometer & Compass (`ak0991x`/`mmc5603`), Ambient Light & Proximity (`stk3329`); live `monitor-sensor` + Phosh auto-rotation/auto-brightness |
+| Hardware Video Codec | Qualcomm `Venus` VPU (`qcom-venus`, `/dev/video0` + `/dev/video1`) | **Working** | 1080p H.264/HEVC & 720p VP9/VP8 HW decode (`7.5x–22.5x` realtime) + 1080p H.264/HEVC HW encode (`7.3x–9.6x`) via GStreamer & `ffmpeg`; squashed stock `venus.mbn` (`VIDEO.VPU.1.0-00096-PROD-2`) |
+| Offline Hardware RTC | PM8150 `rtc0` + `bitra-rtc-sync` (`bitra-device-support 1.3`) | **Working** | Android `time_daemon`-style delta-offset persistence restores `<1 s` accurate wall-clock time before `chronyd` starts even offline |
 | Type-C Video Out (DP Alt-Mode) | USB-C receptacle (USB 2.0-only hardware wiring) | **Hardware Unsupported** | RMX3370 physically wires USB 2.0 lines only (no SuperSpeed TX/RX lanes; `fsa4480` is analog audio only); use VNC/RDP/WayVNC or USB DisplayLink instead |
 | Optional Touch Desktop | `Phosh` + `phoc` Wayland (`bitra-desktop`) | **Working (Optional)** | Headless `multi-user.target` by default; start/stop on demand via `sudo bitra-desktop start` / `stop` |
 | Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, Docker (`overlayfs`, `cgroup2fs`, `iptables-nft` NAT/bridge), AppArmor, `wireguard`, `nf_tables` |
@@ -50,7 +52,9 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | **Audio DSP (`ADSP`)** | **`adsp.mdt`, `adsp.b00`–`adsp.b18`, `adspr.jsn`, `adspua.jsn`** | **Stock `modem` partition / official `NON-HLOS.bin`** (`image/`) | `/lib/firmware/qcom/sm8250/realme/bitra/` |
 | **Stock Rollback Backup (Strongly Recommended)** | **Original `boot.img`, `dtbo.img`, `persist.img`, `mdm1m9kefs1/2/3`** | **Your device before flashing** | Safe external backup on host |
 
-> **Pre-Extracted Generic Stock Firmware Pack (GitHub Release)**: To save time, the **generic (non-device-unique)** stock files (`bitra_dtbo_0.dtbo`, QCA6390 Wi-Fi 6 firmware, SDX55M `sdx55m/*`, `modem_pr/*`, and Adreno 650 GPU `a650_zap.mbn` / `a650_sqe.fw` / `a650_gmu.bin`) are also attached to the **[`firmware-rmx3370-stock` GitHub Release](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.xz`). **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) contain your phone's personal IMEI and are STRICTLY EXCLUDED — you must always extract them read-only from your own phone via `sudo bitra-extract-sdx55-fw`.**
+> **Pre-Extracted Generic Stock Firmware & Pre-Built `.deb` Packages (GitHub Releases)**:
+> - **[`firmware-rmx3370-stock`](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.zst`): Model-generic stock firmware for QCA6390 Wi-Fi 6 + Bluetooth 5.2, SDX55M 5G modem (`sdx55m/*`, `modem_pr/*`), Adreno 650 GPU, ADSP audio DSP, SLPI sensor DSP + configs, and squashed Qualcomm Venus `venus.mbn`. **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) and `/persist/sensors` calibration are STRICTLY EXCLUDED — extract them read-only from your own phone.**
+> - **[`debs-7.4.0-rc3-bitra14`](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/debs-7.4.0-rc3-bitra14)**: Ready-to-install ARM64 `.deb` packages for `linux-image-7.4.0-rc3-bitra14`, `bitra-device-support 1.3`, `hexagonrpc`, `libssc`, and SSC-enabled `iio-sensor-proxy 3.9`.
 
 > **One-Command On-Device Modem Extraction**: Once Ubuntu is running on the phone, **`sudo bitra-extract-sdx55-fw`** automatically mounts the `modem` partition **read-only** and safely extracts **`sdx55m/`**, **`modem_pr/`**, and the read-only **`mdm1m9kefs{1,2,3}` + `mdmddr`** snapshots (runtime EFS syncs write only to `/var/lib/bitra/sdx55m-efs-rw/` and never touch raw UFS).
 
@@ -92,7 +96,7 @@ sudo reboot bootloader
 ```
 
 ## Repository Layout
-- `patches/` — Clean `git format-patch` series (`0001`–`0007`) against upstream Linux `7.4.0-rc3` (`65e4fd942`): `sm8250-realme-bitra.dts`, `mp2650_charger.c`, `panel-samsung-ams662zs01.c`, `synaptics_tcm_i2c.c`, `tfa9874.c`, `ubwc_config.c`, and SDX55M MHI support.
+- `patches/` — Clean `git format-patch` series (`0001`–`0009`) against upstream Linux `7.4.0-rc3` (`65e4fd942`): `sm8250-realme-bitra.dts`, `mp2650_charger.c`, `panel-samsung-ams662zs01.c`, `synaptics_tcm_i2c.c`, `tfa9874.c`, `aw8697.c`, `oplus_bitra_sensor_smem.c`, `u_ether.c` ECM fix, `qcom-venus` SM8250 fixes, `ubwc_config.c`, and SDX55M MHI support.
 - `kernel-cfg/` — Kernel config fragments (`00-base-sm8250-ram.config`, `10-bitra-server.config`).
 - `tools/` — Reproducible build, `.deb` packaging (`linux-image-*.deb`, `bitra-device-support_*.deb`), rootfs assembly, offline DTBO sink injection, and `boot_v2` + AVB hash footer scripts.
 - `docs/` — Build/flash guide, bring-up pitfalls, status ledger, kernel ABI ledger, and tech-debt tracker.

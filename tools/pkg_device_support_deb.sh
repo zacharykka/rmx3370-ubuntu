@@ -1543,6 +1543,88 @@ options msm fbdev=0
 options drm_kms_helper fbdev_emulation=0
 MSMEOF
 
+# 13a-3. Hardware PM8150 RTC delta-offset persistence (accurate offline wall-clock across reboots/power-offs)
+cat > "$STAGE/usr/sbin/bitra-rtc-sync" << "RTCSH"
+#!/bin/bash
+set -euo pipefail
+
+RTC_EPOCH_FILE="/sys/class/rtc/rtc0/since_epoch"
+OFFSET_FILE="/var/lib/bitra/rtc-offset"
+MIN_VALID_EPOCH=1704067200  # 2024-01-01T00:00:00Z
+
+[ -r "$RTC_EPOCH_FILE" ] || exit 0
+RTC_NOW="$(cat "$RTC_EPOCH_FILE")"
+
+case "${1:-status}" in
+  restore)
+    [ -r "$OFFSET_FILE" ] || exit 0
+    OFFSET="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
+    [[ "$OFFSET" =~ ^-?[0-9]+$ ]] || exit 0
+    TARGET=$((RTC_NOW + OFFSET))
+    WALL_NOW="$(date -u +%s)"
+    if [ "$TARGET" -ge "$MIN_VALID_EPOCH" ]; then
+      date -u -s "@$TARGET" >/dev/null
+      logger -t bitra-rtc-sync "Restored wall clock from PM8150 rtc0 ($RTC_NOW + offset $OFFSET -> $(date -u +%FT%TZ))"
+    fi
+    ;;
+  save)
+    WALL_NOW="$(date -u +%s)"
+    if [ "$WALL_NOW" -ge "$MIN_VALID_EPOCH" ]; then
+      mkdir -p "$(dirname "$OFFSET_FILE")"
+      OFFSET=$((WALL_NOW - RTC_NOW))
+      printf "%s\n" "$OFFSET" > "${OFFSET_FILE}.tmp"
+      mv -f "${OFFSET_FILE}.tmp" "$OFFSET_FILE"
+    fi
+    ;;
+  status)
+    echo "rtc0 since_epoch : $RTC_NOW"
+    echo "wall clock UTC   : $(date -u +%FT%TZ) ($(date -u +%s))"
+    echo "saved offset     : $(cat "$OFFSET_FILE" 2>/dev/null || echo none)"
+    ;;
+esac
+RTCSH
+chmod 755 "$STAGE/usr/sbin/bitra-rtc-sync"
+
+cat > "$STAGE/etc/systemd/system/bitra-rtc-sync.service" << "RTCUNIT"
+[Unit]
+Description=RMX3370 PM8150 Hardware RTC Delta-Offset Restore/Save
+DefaultDependencies=no
+After=local-fs.target
+Before=time-sync.target chrony.service shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/bitra-rtc-sync restore
+ExecStop=/usr/sbin/bitra-rtc-sync save
+
+[Install]
+WantedBy=sysinit.target
+RTCUNIT
+
+cat > "$STAGE/etc/systemd/system/bitra-rtc-save.service" << "RTCSAVEU"
+[Unit]
+Description=RMX3370 Periodic PM8150 RTC Offset Snapshot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/bitra-rtc-sync save
+RTCSAVEU
+
+cat > "$STAGE/etc/systemd/system/bitra-rtc-save.timer" << "RTCTIMER"
+[Unit]
+Description=Periodically persist PM8150 RTC wall-clock offset
+
+[Timer]
+OnBootSec=90s
+OnUnitActiveSec=1h
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+RTCTIMER
+
 # 13b. Persistent USB CDC-ECM auto-recovery watchdog (handles macOS sleep/wake, replug & tcpm TOGGLING)
 cat > "$STAGE/usr/sbin/bitra-usb-watch" << "USBWSH"
 #!/bin/bash
@@ -1749,6 +1831,13 @@ cat > "$STAGE/DEBIAN/conffiles" << CONF
 /etc/xdg/xdg-desktop-portal/phosh-portals.conf
 CONF
 
+# V4L2 Qualcomm Venus hardware video codec udev permissions
+mkdir -p "$STAGE/etc/udev/rules.d"
+cat > "$STAGE/etc/udev/rules.d/99-bitra-video.rules" <<'EOF'
+# Allow local desktop/SSH users in video/render groups (and logind seats) to use qcom-venus
+KERNEL=="video[0-9]*", SUBSYSTEM=="video4linux", GROUP="video", MODE="0660", TAG+="uaccess"
+EOF
+
 cat > "$STAGE/DEBIAN/control" << CTRL
 Package: bitra-device-support
 Version: $VER
@@ -1779,6 +1868,10 @@ if [ -d /etc/systemd/system/multi-user.target.wants ]; then
   ln -sf /etc/systemd/system/bitra-oled-blank.service /etc/systemd/system/multi-user.target.wants/bitra-oled-blank.service
   ln -sf /etc/systemd/system/bitra-bt-addr.service /etc/systemd/system/multi-user.target.wants/bitra-bt-addr.service
   ln -sf /etc/systemd/system/bitra-usb-watch.service /etc/systemd/system/multi-user.target.wants/bitra-usb-watch.service
+  mkdir -p /etc/systemd/system/sysinit.target.wants
+  ln -sf /etc/systemd/system/bitra-rtc-sync.service /etc/systemd/system/sysinit.target.wants/bitra-rtc-sync.service
+  ln -sf /etc/systemd/system/bitra-rtc-save.timer /etc/systemd/system/timers.target.wants/bitra-rtc-save.timer
+  if [ -f /etc/systemd/system/hexagonrpcd-sdsp.service ]; then ln -sf /etc/systemd/system/hexagonrpcd-sdsp.service /etc/systemd/system/multi-user.target.wants/hexagonrpcd-sdsp.service; fi
   if [ -f /usr/lib/systemd/system/pd-mapper.service ]; then ln -sf /usr/lib/systemd/system/pd-mapper.service /etc/systemd/system/multi-user.target.wants/pd-mapper.service; fi
   # Prevent systemd-backlight from fighting bitra-oled-blank.service on headless boots
   ln -sf /dev/null /etc/systemd/system/systemd-backlight@backlight:ae94000.dsi.0.service

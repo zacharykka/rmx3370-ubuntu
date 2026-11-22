@@ -1,0 +1,118 @@
+From 6e013dfef1905d99e96ccd21d1d5fe82002206aa Mon Sep 17 00:00:00 2001
+From: ut-bitra <ut-bitra@localhost>
+Date: Mon, 23 Nov 2026 00:05:49 +0800
+Subject: [PATCH] arm64: dts: qcom: bitra: enable Qualcomm Venus HW video codec
+ & PSCI CPU deep idle
+
+- Re-enable SM8250 PSCI OSI CPU/cluster deep idle states (remove Stage-1
+  /delete-node/ idle-states and domain-idle-states workarounds).
+- Enable &venus with squashed stock firmware qcom/sm8250/realme/bitra/venus.mbn
+  (VIDEO.VPU.1.0-00096-PROD-2).
+- qcom-venus: treat HFI_ERR_SESSION_UNSUPPORTED_PROPERTY as non-fatal, guard
+  ChromeOS VP9-only sufficient-seqchange property to VP9, and send NULL EOS
+  address for H.264 on IRIS2 (SM8250) firmware >= 1.0.88 while preserving
+  0xdeadb000 for HEVC/VP8/VP9.
+---
+ .../boot/dts/qcom/sm8250-realme-bitra.dts     | 35 ++++---------------
+ drivers/media/platform/qcom/venus/hfi_msgs.c  |  1 +
+ drivers/media/platform/qcom/venus/vdec.c      |  6 ++--
+ 3 files changed, 11 insertions(+), 31 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+index 3b768c433..fc2288112 100644
+--- a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
++++ b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+@@ -81,26 +81,6 @@ vreg_panel_vout: regulator-panel-vout {
+ 		enable-active-high;
+ 	};
+ 
+-	/*
+-	 * Disable PSCI deep-sleep CPU/cluster idle states for now (stock bootargs
+-	 * also sets lpm_levels.sleep_disabled=1; tracked in docs/tech-debt.md).
+-	 */
+-	cpus {
+-		/delete-node/ idle-states;
+-		/delete-node/ domain-idle-states;
+-	};
+-
+-	psci {
+-		power-domain-cpu0 { /delete-property/ domain-idle-states; };
+-		power-domain-cpu1 { /delete-property/ domain-idle-states; };
+-		power-domain-cpu2 { /delete-property/ domain-idle-states; };
+-		power-domain-cpu3 { /delete-property/ domain-idle-states; };
+-		power-domain-cpu4 { /delete-property/ domain-idle-states; };
+-		power-domain-cpu5 { /delete-property/ domain-idle-states; };
+-		power-domain-cpu6 { /delete-property/ domain-idle-states; };
+-		power-domain-cpu7 { /delete-property/ domain-idle-states; };
+-		power-domain-cpu-cluster0 { /delete-property/ domain-idle-states; };
+-	};
+ 
+ 	gpio-keys {
+ 		compatible = "gpio-keys";
+@@ -361,17 +341,8 @@ adsp_rpc_remote_heap_mem: adsp-rpc-remote-heap {
+ 	};
+ };
+ 
+-&cpu0 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
+-&cpu1 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
+-&cpu2 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
+-&cpu3 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
+-&cpu4 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
+-&cpu5 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
+-&cpu6 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
+-&cpu7 { /delete-property/ power-domains; /delete-property/ power-domain-names; };
+ 
+ &apps_rsc {
+-	/delete-property/ power-domains;
+ 
+ 	regulators-0 {
+ 		compatible = "qcom,pm8150-rpmh-regulators";
+@@ -1154,3 +1125,9 @@ haptics@5a {
+ 		awinic,f0-preset = <1700>;
+ 	};
+ };
++
++/* Qualcomm Venus hardware video decoder/encoder (H.264 / HEVC / VP9) */
++&venus {
++	firmware-name = "qcom/sm8250/realme/bitra/venus.mbn";
++	status = "okay";
++};
+diff --git a/drivers/media/platform/qcom/venus/hfi_msgs.c b/drivers/media/platform/qcom/venus/hfi_msgs.c
+index ed6b4e5e5..c245b6e8d 100644
+--- a/drivers/media/platform/qcom/venus/hfi_msgs.c
++++ b/drivers/media/platform/qcom/venus/hfi_msgs.c
+@@ -208,6 +208,7 @@ event_session_error(struct venus_core *core, struct venus_inst *inst,
+ 	case HFI_ERR_SESSION_INVALID_SCALE_FACTOR:
+ 	case HFI_ERR_SESSION_UNSUPPORT_BUFFERTYPE:
+ 	case HFI_ERR_SESSION_UNSUPPORTED_SETTING:
++	case HFI_ERR_SESSION_UNSUPPORTED_PROPERTY:
+ 	case HFI_ERR_SESSION_UPSCALE_NOT_SUPPORTED:
+ 		inst->error = HFI_ERR_NONE;
+ 		break;
+diff --git a/drivers/media/platform/qcom/venus/vdec.c b/drivers/media/platform/qcom/venus/vdec.c
+index 6a43ea191..eb770082a 100644
+--- a/drivers/media/platform/qcom/venus/vdec.c
++++ b/drivers/media/platform/qcom/venus/vdec.c
+@@ -574,7 +574,9 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
+ 		 * avoids misapplying this quirk and breaking VP9 decode on SC7280.
+ 		 */
+ 
+-		if (IS_IRIS2(inst->core) && is_fw_rev_or_older(inst->core, 1, 0, 87))
++		if (IS_IRIS2(inst->core) &&
++		    (is_fw_rev_or_older(inst->core, 1, 0, 87) ||
++		     inst->fmt_out->pixfmt == V4L2_PIX_FMT_H264))
+ 			fdata.device_addr = 0;
+ 		else
+ 			fdata.device_addr = 0xdeadb000;
+@@ -708,7 +710,7 @@ static int vdec_set_properties(struct venus_inst *inst)
+ 	}
+ 
+ 	/* Enabling sufficient sequence change support for VP9 */
+-	if (is_fw_rev_or_newer(inst->core, 5, 4, 51)) {
++	if (inst->fmt_out->pixfmt == V4L2_PIX_FMT_VP9 && is_fw_rev_or_newer(inst->core, 5, 4, 51)) {
+ 		ptype = HFI_PROPERTY_PARAM_VDEC_ENABLE_SUFFICIENT_SEQCHANGE_EVENT;
+ 		ret = hfi_session_set_property(inst, ptype, &en);
+ 		if (ret)
+-- 
+2.43.0
+

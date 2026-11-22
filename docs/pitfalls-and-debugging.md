@@ -341,3 +341,24 @@ wifi.powersave = 2`) in `bitra-device-support` (latency drops to ~6 ms consisten
 
 ## 41. USB Type-C Video Output (DisplayPort Alt-Mode) Is Physically Unsupported on RMX3370
 - **Finding**: Verified via official hardware specifications and live `a600000.usb` link capability (`high-speed` USB 2.0 only) that the realme GT Neo 2 (`RMX3370`) Type-C receptacle only routes USB 2.0 D+/D- and CC lines (with `fsa4480@42` handling analog audio switching); SuperSpeed TX/RX lanes are not wired to the port. Native DisplayPort Alt-Mode over USB-C is physically impossible on both stock Android and mainline Linux. Use VNC/RDP/WayVNC (over Wi-Fi 6 or USB ECM) or a USB 2.0 DisplayLink adapter for external display output.
+
+---
+
+## 42. Qualcomm Venus Video Codec on Linux 7.4 SM8250: `qcom-iris` Crash, Split `venus.mdt` Squash, & `1.0.96` H.264 EOS Bug
+- **Symptoms**:
+  1. Enabling `&venus` on Linux 7.4 `defconfig` bound the new experimental `qcom-iris` driver (`CONFIG_VIDEO_QCOM_IRIS=m`), which failed loading split `venus.b19` (`-40`) and, even after squashing `venus.mbn`, crashed with `sys error (type: 1, session id:ff, data1:1, data2:deadbead)`. Meanwhile `qcom-venus` compiled out SM8250 (`#if !IS_ENABLED(CONFIG_VIDEO_QCOM_IRIS)` in `venus/core.c`).
+  2. After switching to classic `qcom-venus` (`# CONFIG_VIDEO_QCOM_IRIS is not set`), hardware encoding immediately worked (~300 fps), but decoding failed with `session error: event id:1007` (`HFI_ERR_SESSION_UNSUPPORTED_PROPERTY`) and H.264 decoding crashed the VPU firmware at EOS (`SFR message from FW: Exception: TID = Unknown IP = 0x3bcd4 FA = 0x0 cause = 0x6`).
+- **Root Causes**:
+  1. TrustZone PAS authentication on SM8250 expects a single squashed ELF (`venus.mbn`, 12 segments, 1.9 MiB) rather than split `venus.mdt` + `venus.b*`.
+  2. RMX3370 stock firmware (`VIDEO.VPU.1.0-00096-PROD-2`) does not implement ChromeOS `HFI_PROPERTY_PARAM_VDEC_ENABLE_SUFFICIENT_SEQCHANGE_EVENT` (returning `0x1007`), which mainline `hfi_msgs.c` treated as fatal.
+  3. Mainline `venus/vdec.c` only sent a NULL (`0`) EOS buffer address on IRIS2 for firmware `<= 1.0.87`, falling back to fake address `0xdeadb000` on `1.0.96`. Turning on Venus firmware debug logs (`VDBGFW`) revealed `ETB cmd state 2 addr deadb000 fLen 0 nFlags 1` immediately before the crash: on `1.0.96`, **H.264 decode requires `device_addr = 0` on EOS**, whereas **VP8 (`vpx_decoder.c:5646`) and HEVC require `0xdeadb000`**.
+- **Fix**:
+  1. Squash stock `venus.mdt` + `venus.b*` into `/lib/firmware/qcom/sm8250/realme/bitra/venus.mbn` and disable `CONFIG_VIDEO_QCOM_IRIS` so classic `qcom-venus` binds SM8250.
+  2. Patch `qcom-venus` (3 lines in `0009`): treat `HFI_ERR_SESSION_UNSUPPORTED_PROPERTY` as non-fatal in `hfi_msgs.c`, restrict `HFI_PROPERTY_PARAM_VDEC_ENABLE_SUFFICIENT_SEQCHANGE_EVENT` to VP9 in `vdec.c`, and send `fdata.device_addr = 0` for `V4L2_PIX_FMT_H264` on `IS_IRIS2` while keeping `0xdeadb000` for HEVC/VP8/VP9. All 6 HW codecs (1080p H.264/HEVC & 720p VP9/VP8 decode, 1080p H.264/HEVC encode) now run consecutively at `7.3x–22.5x` realtime with zero `dmesg` errors.
+
+---
+
+## 43. PM8150 Read-Only `rtc0` & Systemd Build-Epoch Guard in Offline RTC Restore
+- **Symptom**: Stock RMX3370 `live.dts` only exposes one PM8150 `sdam@b100` (no dedicated `rtc_offset` cell), so `rtc-pm8xxx` always reports raw monotonic seconds from 1970 (`1970-03-xx`). An initial `bitra-rtc-sync` script skipped restoring the saved offset whenever `date +%s >= 2024-01-01`.
+- **Root Cause**: Ubuntu 24.04 `systemd` initializes system wall clock from its own build timestamp (`>= 2024`) before `sysinit.target` starts, tripping any `< 2024` guard and leaving the clock stale until `chronyd` eventually stepped it by 12+ seconds.
+- **Fix**: In `bitra-device-support >= 1.3`, `bitra-rtc-sync restore` unconditionally applies `rtc0_since_epoch + saved_offset` whenever the computed target is `>= 2024-01-01` (`Before=time-sync.target chrony.service`), restoring offline wall-clock time to `<1 s` accuracy before networking starts.

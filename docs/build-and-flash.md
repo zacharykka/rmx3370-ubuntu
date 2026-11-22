@@ -57,7 +57,9 @@ cd ..
 >   7. **QCA6390 Bluetooth 5.2 firmware** — **`image/htbtfw20.tlv` & `image/htnv20.bin`** from stock **`bluetooth` partition (`/dev/sde5`)** -> `/lib/firmware/qca/`.
 >   8. **Audio DSP (`ADSP`) firmware** — **`image/adsp.mdt`, `image/adsp.b00`–`adsp.b18`, `image/adspr.jsn`, `image/adspua.jsn`** from stock **`modem` partition (`/dev/sde4` / `NON-HLOS.bin`)** -> `/lib/firmware/qcom/sm8250/realme/bitra/`.
 
-> **Pre-Extracted Generic Stock Firmware Pack (GitHub Release)**: To save time, the **generic (non-device-unique)** stock files (`bitra_dtbo_0.dtbo`, QCA6390 Wi-Fi 6 firmware, SDX55M `sdx55m/*`, `modem_pr/*`, and Adreno 650 GPU `a650_zap.mbn` / `a650_sqe.fw` / `a650_gmu.bin`) are also attached to the **[`firmware-rmx3370-stock` GitHub Release](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.xz`). **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) contain your phone's personal IMEI and are STRICTLY EXCLUDED — you must always extract them read-only from your own phone via `sudo bitra-extract-sdx55-fw`.**
+> **Pre-Extracted Generic Stock Firmware & Pre-Built `.deb` Packages (GitHub Releases)**:
+> - **[`firmware-rmx3370-stock`](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.zst`): Model-generic stock firmware for QCA6390 Wi-Fi 6 + Bluetooth 5.2, SDX55M 5G modem (`sdx55m/*`, `modem_pr/*`), Adreno 650 GPU, ADSP audio DSP, SLPI sensor DSP + configs, and squashed Qualcomm Venus `venus.mbn`. **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) and `/persist/sensors` calibration are STRICTLY EXCLUDED — extract them read-only from your own phone.**
+> - **[`debs-7.4.0-rc3-bitra14`](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/debs-7.4.0-rc3-bitra14)**: Ready-to-install ARM64 `.deb` packages for `linux-image-7.4.0-rc3-bitra14`, `bitra-device-support 1.3`, `hexagonrpc`, `libssc`, and SSC-enabled `iio-sensor-proxy 3.9`.
 
 Stage build-time inputs on your build host:
 ```bash
@@ -92,10 +94,10 @@ make -j$(nproc) -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" \
 
 ### 4.2 Build `.deb` Packages
 ```bash
-# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra13_1_arm64.deb
+# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra14_1_arm64.deb
 OUT="$PWD/out/server-build" bash tools/pkg_kernel_deb.sh
 
-# Device integration package -> out/debs/bitra-device-support_1.2_arm64.deb
+# Device integration package -> out/debs/bitra-device-support_1.3_arm64.deb
 # Includes: USB CDC-ECM service, key-only SSH config, NetworkManager usb0 unmanaged rule,
 #           compact initramfs-tools config (MODULES=list), Wi-Fi MAC udev rule,
 #           24/7 anti-swelling charge-limit systemd timer, 24/7 no-suspend policy
@@ -111,12 +113,12 @@ bash tools/pkg_device_support_deb.sh 1.1
 # installs server packages + our two .debs via qemu-aarch64-static chroot,
 # generates compact initrd (< 8 MiB), and outputs:
 #   out/ubuntu-24.04.5-bitra-server-arm64.tar.gz
-#   out/initrd.img-7.4.0-rc3-bitra13
+#   out/initrd.img-7.4.0-rc3-bitra14
 bash tools/build_ubuntu_rootfs.sh
 
 # Injects DTBO sink symbols, verifies offline fdtoverlay apply, checks initrd <= 14 MiB,
 # builds Android boot_v2 image, and appends 96 MiB AVB hash footer:
-#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra13.img
+#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra14.img
 OUT="$PWD/out/server-build" bash tools/make_ubuntu_boot.sh
 ```
 
@@ -173,12 +175,12 @@ chroot /mnt /usr/bin/python3 -c 'import ctypes; ctypes.CDLL("libc.so.6").syscall
 
 ### 7.1 Always RAM-Test Before Flashing
 ```bash
-fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra13.img
+fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra14.img
 ```
 Wait ~20–25 seconds, then SSH in:
 ```bash
 ssh ubuntu@192.168.2.15
-uname -a                    # 7.4.0-rc3-bitra13 aarch64
+uname -a                    # 7.4.0-rc3-bitra14 aarch64
 systemctl is-system-running # running (0 failed units)
 df -h /                     # /dev/sda11 ~222G
 ```
@@ -282,7 +284,7 @@ sudo chmod 644 /lib/firmware/qca/ht* /lib/firmware/qcom/sm8250/realme/bitra/adsp
 sudo usermod -aG audio,bluetooth ubuntu
 sudo systemctl enable pd-mapper.service bluetooth.service bitra-bt-addr.service
 
-# 4. Verify after booting bitra13 + bitra-device-support 1.2:
+# 4. Verify after booting bitra14 + bitra-device-support 1.3:
 hciconfig -a
 bluetoothctl show
 wpctl status    # Shows Stereo Speakers (Dual TFA9874) + Internal Microphones (WCD9380)
@@ -291,7 +293,7 @@ wpctl status    # Shows Stereo Speakers (Dual TFA9874) + Internal Microphones (W
 
 ### 7.2e Linear Haptics (`AW8697`) & SLPI Sensors (`hexagonrpcd` + `libssc` + `iio-sensor-proxy`)
 
-1. **Linear Haptics (`AW8697`)**: Works out-of-the-box on `7.4.0-rc3-bitra13` + `bitra-device-support 1.2`. Install `feedbackd` (and optionally `joystick` for `fftest`) so Phosh/apps trigger tactile feedback via `FEEDBACKD_TYPE=vibra`.
+1. **Linear Haptics (`AW8697`)**: Works out-of-the-box on `7.4.0-rc3-bitra14` + `bitra-device-support 1.3`. Install `feedbackd` (and optionally `joystick` for `fftest`) so Phosh/apps trigger tactile feedback via `FEEDBACKD_TYPE=vibra`.
 2. **SLPI Firmware & Sensor Configs**:
    - Generic model files (included in `firmware-rmx3370-stock` Release):
      - `/lib/firmware/qcom/sm8250/realme/bitra/slpi.{mdt,b00..b21}`, `slpir.jsn`, `slpius.jsn`
@@ -306,7 +308,7 @@ wpctl status    # Shows Stereo Speakers (Dual TFA9874) + Internal Microphones (W
      sudo ln -sfn /var/lib/bitra/persist-sensors/registry/registry /usr/share/qcom/sm8250/realme/bitra/sensors/registry
      ```
    - **Important**: Do **not** create `/usr/share/qcom/sm8250/realme/bitra/socinfo/` — otherwise SLPI tries to rewrite `temp.json` into the read-only registry and stalls (see Pitfall 39).
-3. **Userspace sensor stack**: Build & install `hexagonrpc` (`hexagonrpcd`), `libssc` (`https://codeberg.org/DylanVanAssche/libssc`), and `iio-sensor-proxy` with `-Dssc-support=enabled`. `bitra-device-support 1.2` ships `hexagonrpcd-sdsp.service`, `81-bitra-ssc-sensors.rules`, and the `iio-sensor-proxy` ordering drop-in.
+3. **Userspace sensor stack**: Download & install the pre-built ARM64 `.deb` packages (`hexagonrpc_0.5.0-bitra1_arm64.deb`, `libssc_0.4.4-bitra1_arm64.deb`, `iio-sensor-proxy_3.9-bitra1_arm64.deb`) from the **[`debs-7.4.0-rc3-bitra14` GitHub Release](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/debs-7.4.0-rc3-bitra14)** (or build from source with `-Dssc-support=enabled`). `bitra-device-support 1.3` ships `hexagonrpcd-sdsp.service`, `81-bitra-ssc-sensors.rules`, and the `iio-sensor-proxy` ordering drop-in.
 4. **Verify**:
    ```bash
    sudo ssccli --sensor accelerometer --timeout 2
@@ -315,13 +317,30 @@ wpctl status    # Shows Stereo Speakers (Dual TFA9874) + Internal Microphones (W
    sudo timeout 5 monitor-sensor
    ```
 
+### 7.2f Hardware Video Decode/Encode (Qualcomm Venus) & Offline Hardware RTC
+
+1. **Venus VPU Firmware (`venus.mbn`)**: Already included in the **[`firmware-rmx3370-stock`](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** release tarball (`/lib/firmware/qcom/sm8250/realme/bitra/venus.mbn`), or squash it locally from stock `modem` partition (`venus.mdt` + `venus.b00..b10`, `venus.b19`) using `pil-squasher`.
+2. **Userspace tools & verification** (`bitra-device-support 1.3` automatically grants `video`/`render` group access to `/dev/video0` & `/dev/video1`):
+   ```bash
+   sudo apt update && sudo apt install -y ffmpeg v4l-utils gstreamer1.0-tools gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+   v4l2-ctl --list-devices    # Shows Qualcomm Venus decoder (/dev/video0) + encoder (/dev/video1)
+
+   # 1080p HEVC hardware encode & decode smoke test (~218 fps enc / ~361 fps dec)
+   gst-launch-1.0 videotestsrc num-buffers=60 ! video/x-raw,format=NV12,width=1920,height=1080,framerate=30/1 ! v4l2h265enc ! h265parse ! mp4mux ! filesink location=/tmp/test_hevc.mp4
+   gst-launch-1.0 filesrc location=/tmp/test_hevc.mp4 ! qtdemux ! h265parse ! v4l2h265dec ! fakesink
+
+   # 1080p H.264 hardware decode via ffmpeg (~224 fps)
+   ffmpeg -c:v h264_v4l2m2m -i /tmp/in_h264_1080p.mp4 -f null -
+   ```
+3. **Offline Hardware RTC (`bitra-rtc-sync`)**: Enabled automatically by `bitra-device-support 1.3` (`bitra-rtc-sync.service` + `bitra-rtc-save.timer`). Verify on boot with `journalctl -b -u bitra-rtc-sync`.
+
 ### 7.3 Flash `boot` Partition & Verify Cold Boot
 ```bash
 # On the phone (reboots straight into Fastboot, no buttons needed):
 sudo reboot bootloader
 
 # On your host:
-fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra13.img
+fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra14.img
 fastboot -s <SERIAL> reboot
 ```
 After ~25 seconds, cold-boot SSH (`ssh ubuntu@192.168.2.15`) is live and `bitra-oled-blank.service` puts the OLED panel into true DPMS power-off (0 burn-in while headless).
