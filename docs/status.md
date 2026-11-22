@@ -3,7 +3,7 @@
 - **Device**: realme GT Neo 2 (`RMX3370`, codename `bitra`, OPLUS project `21619` / `0x5473`)
 - **SoC**: Qualcomm SM8250-AC (`kona v2.1`), 12 GiB RAM, 256 GiB UFS 3.1 (A-only, `boot` 96 MiB, `userdata` = `/dev/sda11` ~226.5 GiB)
 - **Target**: Headless 24/7 ARM64 Ubuntu 24.04.5 LTS Server (single-OS on `sda11`, GPT untouched)
-- **Kernel**: Mainline Linux `7.4.0-rc3-bitra10` (`kernel/` branch `rmx3370-mainline`, commit `1b62f9d0a`)
+- **Kernel**: Mainline Linux `7.4.0-rc3-bitra11` (`kernel/` branch `rmx3370-mainline`, commit `85282f26f`)
 
 ## Milestone Status
 
@@ -21,4 +21,5 @@
 | 6.5 | USB Host/OTG + Type-C + SM8250-AC 3.1872 GHz OPP | **Done (flashed & cold-boot verified; external USB drive tested OK)** | `pm8150b_typec` dual-role + `usb_1_dwc3` `dr_mode=otg` + MP2650 5V OTG VBUS boost regulator + `cpu7` 3.1872 GHz OPP verified live |
 | P1.5 | Built-in SDX55M 5G Modem + SMS (`mhi_pci_generic` + Sahara + EFS Sync + `tqftpserv-sdx55` + `ModemManager`) | **Done (flashed & cold-boot verified in `bitra9`)** | PCIe2 Gen3 x2 + GICv3-MBI (0 SMMU faults) + `ap2mdm_status` GPIO v2 + Sahara v2 auto-load + continuous Sahara EFS Sync (`/dev/wwan0efs0` -> local RW copy, raw UFS untouched) + QRTR TFTP (`Service 4096` v1..10) + live cellular registration & `mmcli` SMS ready |
 | Extra | Docker `iptables-nft` + DNS `dns=default` | **Done (flashed & cold-boot verified in `bitra9`)** | `CONFIG_NFT_COMPAT` + `XT_NAT` + `IP_NF_*` (`dockerd 29.10` container bridge networking verified) + NetworkManager `dns=default` |
-| P1.6 | Built-in SDX55M 5G NR SA Cellular Data (`qrtr://3` QMI + `rmnet_data0@mhi_hwip0` + `bitra-wwan`) | **Done (verified live on 5G NR SA)** | `IPCR` 64-desc on `SW_DATA` ER2 (`bitra10`, upstream `IP_HW0` ER 5/6 preserved), WDA `raw-ip + QMAP` on PCIe EP 4, Dual-SIM DSDS (`WDS Bind Subscription 0x00AF`), live 5G NR SA IPv4/ping/HTTPS verified on `rmnet_data0` while Wi-Fi 6 & SMS remain active |
+| P1.6 | Built-in SDX55M 5G NR SA Cellular Data (`qrtr://3` QMI + `rmnet_data0@mhi_hwip0` + `bitra-wwan`) | **Done (flashed & cold-boot verified in `bitra10`)** | `IPCR` 64-desc on `SW_DATA` ER2 (`bitra10`, upstream `IP_HW0` ER 5/6 preserved), WDA `raw-ip + QMAP` on PCIe EP 4, Dual-SIM DSDS (`WDS Bind Subscription 0x00AF`), live 5G NR SA IPv4/ping/HTTPS verified on `rmnet_data0` while Wi-Fi 6 & SMS remain active |
+| P2 | Native OLED Display + Adreno 650 GPU + Synaptics S3908 Touch + Keys + Optional Phosh Desktop | **Done (flashed & cold-boot verified in `bitra11` + `device-support 1.0`)** | Samsung `AMS662ZS01` `1080x2400` DSC OLED + 12-bit backlight + true DPMS off/on (`bitra-oled-blank.service` auto-blanks on headless boot), Adreno 650 (`freedreno` GL 4.6 / `Turnip` Vulkan), Synaptics `S3908` 10-finger touch, Volume Up/Down (`pm8150` GPIO 6/7), and on-demand Phosh desktop (`sudo bitra-desktop start`/`stop`) |

@@ -53,6 +53,7 @@ cd ..
 >   3. **QCA6390 Wi-Fi 6 firmware** — **`amss20.bin` (`-> amss.bin`) & `m3.bin`** from stock **`modem` (`NON-HLOS.bin`)**, plus device-own **`bdwlan.elf` (`-> board.bin`)** from **`persist` (`/dev/sda2`)**.
 >   4. **SDX55M 5G modem firmware & carrier MCFG** — **Entire `image/sdx55m/*` (`sbl1.mbn`, `qdsp6sw.mbn`, `apps.mbn`, `aop.mbn`, `tz.mbn`, `hyp.mbn`, `acdb.mbn`, `multi_image*.mbn`, `xbl_cfg.elf`, `apdp.mbn`, `devcfg.mbn`, `sec.elf`)** and **`image/modem_pr/*`** from stock **`modem` (`NON-HLOS.bin`)**.
 >   5. **Device-unique SDX55M EFS read-only snapshot** — **`mdm1m9kefs1`, `mdm1m9kefs2`, `mdm1m9kefs3`, `mdmddr`** dumped **read-only** from your own phone's UFS partitions via `sudo bitra-extract-sdx55-fw`. (**Never share your EFS files and never write to raw UFS EFS partitions.**)
+>   6. **Adreno 650 GPU firmware (for Display / GPU / Phosh)** — **Stock device-signed `firmware/a650_zap.elf` -> `/lib/firmware/qcom/sm8250/realme/bitra/a650_zap.mbn`** from stock **`vendor` (`vendor.img`)**, paired with **upstream `linux-firmware` `qcom/a650_sqe.fw` (`>= v95`, stock Android v93 is rejected by Linux 7.4) & `qcom/a650_gmu.bin`**.
 
 > **Pre-Extracted Generic Stock Firmware Pack (GitHub Release)**: To save time, the **generic (non-device-unique)** stock files (`bitra_dtbo_0.dtbo`, QCA6390 Wi-Fi 6 firmware, SDX55M `sdx55m/*`, and `modem_pr/*`) are also attached to the **[`firmware-rmx3370-stock` GitHub Release](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.xz`). **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) contain your phone's personal IMEI and are STRICTLY EXCLUDED — you must always extract them read-only from your own phone via `sudo bitra-extract-sdx55-fw`.**
 
@@ -89,14 +90,14 @@ make -j$(nproc) -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" \
 
 ### 4.2 Build `.deb` Packages
 ```bash
-# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra10_1_arm64.deb
+# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra11_1_arm64.deb
 OUT="$PWD/out/server-build" bash tools/pkg_kernel_deb.sh
 
-# Device integration package -> out/debs/bitra-device-support_0.9_arm64.deb
+# Device integration package -> out/debs/bitra-device-support_1.0_arm64.deb
 # Includes: USB CDC-ECM service, key-only SSH config, NetworkManager usb0 unmanaged rule,
 #           compact initramfs-tools config (MODULES=list), Wi-Fi MAC udev rule,
 #           24/7 anti-swelling charge-limit systemd timer, 24/7 no-suspend policy
-bash tools/pkg_device_support_deb.sh 0.9
+bash tools/pkg_device_support_deb.sh 1.0
 ```
 
 ---
@@ -108,12 +109,12 @@ bash tools/pkg_device_support_deb.sh 0.9
 # installs server packages + our two .debs via qemu-aarch64-static chroot,
 # generates compact initrd (< 8 MiB), and outputs:
 #   out/ubuntu-24.04.5-bitra-server-arm64.tar.gz
-#   out/initrd.img-7.4.0-rc3-bitra10
+#   out/initrd.img-7.4.0-rc3-bitra11
 bash tools/build_ubuntu_rootfs.sh
 
 # Injects DTBO sink symbols, verifies offline fdtoverlay apply, checks initrd <= 14 MiB,
 # builds Android boot_v2 image, and appends 96 MiB AVB hash footer:
-#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra10.img
+#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra11.img
 OUT="$PWD/out/server-build" bash tools/make_ubuntu_boot.sh
 ```
 
@@ -170,12 +171,12 @@ chroot /mnt /usr/bin/python3 -c 'import ctypes; ctypes.CDLL("libc.so.6").syscall
 
 ### 7.1 Always RAM-Test Before Flashing
 ```bash
-fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra10.img
+fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra11.img
 ```
 Wait ~20–25 seconds, then SSH in:
 ```bash
 ssh ubuntu@192.168.2.15
-uname -a                    # 7.4.0-rc3-bitra10 aarch64
+uname -a                    # 7.4.0-rc3-bitra11 aarch64
 systemctl is-system-running # running (0 failed units)
 df -h /                     # /dev/sda11 ~222G
 ```
@@ -219,16 +220,51 @@ sudo systemctl enable bitra-wwan.service
 ```
 > **EFS Safety**: Runtime EFS syncs from SDX55M (`bitra-sdx55-efs-sync.service` over `/dev/wwan0efs0`) are written **only** to `/var/lib/bitra/sdx55m-efs-rw/`. The phone's factory UFS EFS partitions (`/dev/disk/by-partlabel/mdm1m9kefs*`) are **never** written to.
 
+### 7.2c Optional: Adreno 650 GPU Firmware & Phosh Mobile Touch Desktop
+
+The system boots into **headless `multi-user.target`** by default and automatically powers off the OLED (`bitra-oled-blank.service`) to prevent burn-in. To enable hardware-accelerated 3D (`freedreno` / `Turnip`) and on-demand Phosh desktop:
+
+```bash
+# 1. Stage GPU firmware:
+#    - Stock device-signed a650_zap.elf (from official vendor.img firmware/a650_zap.elf)
+#      -> /lib/firmware/qcom/sm8250/realme/bitra/a650_zap.mbn
+#    - Upstream linux-firmware a650_sqe.fw (>= v95) and a650_gmu.bin
+#      -> /lib/firmware/qcom/a650_sqe.fw and /lib/firmware/qcom/a650_gmu.bin
+sudo mkdir -p /lib/firmware/qcom/sm8250/realme/bitra
+
+# 2. Install Phosh mobile shell, Mesa freedreno/Turnip, and CJK fonts
+sudo apt update && sudo apt install -y \
+  phosh phoc phosh-osk-stub gnome-session-bin gnome-settings-daemon \
+  kgx nautilus gnome-control-center fonts-noto-cjk \
+  libgl1-mesa-dri mesa-vulkan-drivers mesa-utils vulkan-tools
+
+# Remove GNOME-Shell-only portal backend (prevents 25s D-Bus hang in Phosh; bitra-device-support also ships phosh-portals.conf)
+sudo apt-get remove -y xdg-desktop-portal-gnome || true
+
+# Keep headless server default on boot
+sudo systemctl set-default multi-user.target
+sudo systemctl disable phosh.service
+
+# 3. Set a local password/PIN for unlocking Phosh's lockscreen
+#    (SSH remains strictly key-only via /etc/ssh/sshd_config.d/10-bitra-keyonly.conf)
+sudo passwd ubuntu
+
+# 4. Launch or stop Phosh on demand (OLED powers off completely on stop)
+sudo bitra-desktop start
+sudo bitra-desktop status
+sudo bitra-desktop stop
+```
+
 ### 7.3 Flash `boot` Partition & Verify Cold Boot
 ```bash
 # On the phone (reboots straight into Fastboot, no buttons needed):
 sudo reboot bootloader
 
 # On your host:
-fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra10.img
+fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra11.img
 fastboot -s <SERIAL> reboot
 ```
-After ~25 seconds, cold-boot SSH (`ssh ubuntu@192.168.2.15`) is live; after ~32 seconds, `regulator_late_cleanup` powers off the OLED rails (`vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15` -> `disabled`).
+After ~25 seconds, cold-boot SSH (`ssh ubuntu@192.168.2.15`) is live and `bitra-oled-blank.service` puts the OLED panel into true DPMS power-off (0 burn-in while headless).
 
 ---
 

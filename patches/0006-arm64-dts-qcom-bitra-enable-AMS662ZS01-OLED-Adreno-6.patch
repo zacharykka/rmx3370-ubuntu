@@ -1,0 +1,1181 @@
+From 85282f26fe8eff012a1464101c902e8fe333ac1e Mon Sep 17 00:00:00 2001
+From: ut-bitra <ut-bitra@localhost>
+Date: Sun, 22 Nov 2026 12:26:59 +0800
+Subject: [PATCH] arm64: dts: qcom: bitra: enable AMS662ZS01 OLED, Adreno 650
+ GPU, S3908 touch & volume keys
+
+- Add Samsung AMS662ZS01 1080x2400 command-mode DSC 1.1 AMOLED panel driver with native 12-bit DCS backlight and true DPMS off/on.
+
+- Add Synaptics TouchComm gen-1 I2C touchscreen driver (syna,s3908 on I2C13 0x4b, native 8639x19199 10-finger MT Protocol B).
+
+- Add qcom,kona UBWC config alias in ubwc_config.c so stock ABL dtbo root compatible overwrite still resolves SM8250 UBWC 4.0 HBB16.
+
+- Enable &gmu, &gpu, &gpu_zap_shader (a650_zap.mbn), &mdss, &mdss_dsi0, &mdss_dsi0_phy, &qupv3_id_1, &i2c13, vreg_l1c_1p8, vreg_l11c_3p0, and pm8150 gpio6/gpio7 Volume Up/Down keys.
+---
+ .../boot/dts/qcom/sm8250-realme-bitra.dts     | 165 +++++
+ drivers/gpu/drm/panel/Kconfig                 |   9 +
+ drivers/gpu/drm/panel/Makefile                |   1 +
+ .../gpu/drm/panel/panel-samsung-ams662zs01.c  | 301 +++++++++
+ drivers/input/touchscreen/Kconfig             |   7 +
+ drivers/input/touchscreen/Makefile            |   1 +
+ drivers/input/touchscreen/synaptics_tcm_i2c.c | 576 ++++++++++++++++++
+ drivers/soc/qcom/ubwc_config.c                |   1 +
+ 8 files changed, 1061 insertions(+)
+ create mode 100644 drivers/gpu/drm/panel/panel-samsung-ams662zs01.c
+ create mode 100644 drivers/input/touchscreen/synaptics_tcm_i2c.c
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+index 7ef2bef92..6a60c4690 100644
+--- a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
++++ b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+@@ -89,6 +89,28 @@ psci {
+ 		power-domain-cpu-cluster0 { /delete-property/ domain-idle-states; };
+ 	};
+ 
++	gpio-keys {
++		compatible = "gpio-keys";
++		pinctrl-0 = <&vol_up_n &vol_down_n>;
++		pinctrl-names = "default";
++
++		key-vol-up {
++			label = "Volume Up";
++			linux,code = <KEY_VOLUMEUP>;
++			gpios = <&pm8150_gpios 6 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++			wakeup-source;
++		};
++
++		key-vol-down {
++			label = "Volume Down";
++			linux,code = <KEY_VOLUMEDOWN>;
++			gpios = <&pm8150_gpios 7 GPIO_ACTIVE_LOW>;
++			debounce-interval = <15>;
++			wakeup-source;
++		};
++	};
++
+ 	vph_pwr: vph-pwr-regulator {
+ 		compatible = "regulator-fixed";
+ 		regulator-name = "vph_pwr";
+@@ -453,6 +475,13 @@ vreg_s8c_1p3: smps8 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
++		vreg_l1c_1p8: ldo1 {
++			regulator-name = "vreg_l1c_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
+ 		vreg_l2c_1p15: ldo2 {
+ 			regulator-name = "vreg_l2c_1p15";
+ 			regulator-boot-on;
+@@ -461,6 +490,13 @@ vreg_l2c_1p15: ldo2 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
++		vreg_l11c_3p0: ldo11 {
++			regulator-name = "vreg_l11c_3p0";
++			regulator-min-microvolt = <2832000>;
++			regulator-max-microvolt = <3304000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
+ 		vreg_bob: bob {
+ 			regulator-name = "vreg_bob";
+ 			regulator-min-microvolt = <3008000>;
+@@ -704,3 +740,132 @@ &pcie2_phy {
+ 	vdda-pll-supply = <&vreg_l9a_1p2>;
+ 	status = "okay";
+ };
++
++/* Adreno 650 GPU + ZAP shader (a650_zap.mbn from stock vendor firmware) */
++&gmu {
++	status = "okay";
++};
++
++&gpu {
++	status = "okay";
++};
++
++&gpu_zap_shader {
++	memory-region = <&gpu_mem>;
++	firmware-name = "qcom/sm8250/realme/bitra/a650_zap.mbn";
++};
++
++/* Display subsystem + Samsung AMS662ZS01 1080x2400 AMOLED DSC panel on DSI0 */
++&mdss {
++	status = "okay";
++};
++
++&mdss_dsi0 {
++	vdda-supply = <&vreg_l9a_1p2>;
++	status = "okay";
++
++	display_panel: panel@0 {
++		compatible = "samsung,ams662zs01";
++		reg = <0>;
++
++		vddio-supply = <&vreg_l14a_1p8>;
++		vci-supply = <&vreg_l13a_3p0>;
++		vddr-supply = <&vreg_l2c_1p15>;
++
++		reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
++		vout-gpios = <&tlmm 125 GPIO_ACTIVE_HIGH>;
++
++		pinctrl-0 = <&sde_dsi_active &sde_te_active>;
++		pinctrl-names = "default";
++
++		port {
++			panel_in: endpoint {
++				remote-endpoint = <&mdss_dsi0_out>;
++			};
++		};
++	};
++};
++
++&mdss_dsi0_out {
++	data-lanes = <0 1 2 3>;
++	remote-endpoint = <&panel_in>;
++};
++
++&mdss_dsi0_phy {
++	vdds-supply = <&vreg_l5a_0p88>;
++	status = "okay";
++};
++
++/* QUPv3 wrap 1 -> I2C13 (0xa94000): Synaptics S3908 TouchComm touchscreen @ 0x4b */
++&qupv3_id_1 {
++	status = "okay";
++};
++
++&i2c13 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	touchscreen@4b {
++		compatible = "syna,s3908";
++		reg = <0x4b>;
++
++		interrupt-parent = <&tlmm>;
++		interrupts = <39 IRQ_TYPE_LEVEL_LOW>;
++		reset-gpios = <&tlmm 38 GPIO_ACTIVE_LOW>;
++
++		vdd-supply = <&vreg_l11c_3p0>;
++		vddio-supply = <&vreg_l1c_1p8>;
++
++		pinctrl-0 = <&ts_int_active &ts_reset_active>;
++		pinctrl-names = "default";
++
++	};
++};
++
++&pm8150_gpios {
++	vol_up_n: vol-up-n-state {
++		pins = "gpio6";
++		function = "normal";
++		power-source = <1>;
++		input-enable;
++		bias-pull-up;
++	};
++
++	vol_down_n: vol-down-n-state {
++		pins = "gpio7";
++		function = "normal";
++		power-source = <1>;
++		input-enable;
++		bias-pull-up;
++	};
++};
++
++&tlmm {
++	sde_dsi_active: sde-dsi-active-state {
++		pins = "gpio75";
++		function = "gpio";
++		drive-strength = <8>;
++		bias-disable;
++	};
++
++	sde_te_active: sde-te-active-state {
++		pins = "gpio66";
++		function = "mdp_vsync";
++		drive-strength = <2>;
++		bias-pull-down;
++	};
++
++	ts_int_active: ts-int-active-state {
++		pins = "gpio39";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-disable;
++	};
++
++	ts_reset_active: ts-reset-active-state {
++		pins = "gpio38";
++		function = "gpio";
++		drive-strength = <2>;
++		bias-pull-up;
++	};
++};
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index 7a520b4d6..de5d8ebe3 100644
+--- a/drivers/gpu/drm/panel/Kconfig
++++ b/drivers/gpu/drm/panel/Kconfig
+@@ -947,6 +947,15 @@ config DRM_PANEL_SAMSUNG_AMS581VF01
+ 	  Say Y or M here if you want to enable support for the
+ 	  Samsung AMS581VF01 FHD Plus (2340x1080@60Hz) CMD mode panel.
+ 
++config DRM_PANEL_SAMSUNG_AMS662ZS01
++	tristate "Samsung AMS662ZS01 FHD+ AMOLED DSC DSI panel"
++	depends on OF
++	depends on DRM_MIPI_DSI
++	depends on BACKLIGHT_CLASS_DEVICE
++	help
++	  Say Y here if you want to enable support for Samsung AMS662ZS01
++	  1080x2400 command-mode DSC AMOLED panel (e.g. realme GT Neo 2).
++
+ config DRM_PANEL_SAMSUNG_AMS639RQ08
+ 	tristate "Samsung AMS639RQ08 panel"
+ 	depends on OF
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index da5175909..0a64ed57b 100644
+--- a/drivers/gpu/drm/panel/Makefile
++++ b/drivers/gpu/drm/panel/Makefile
+@@ -92,6 +92,7 @@ obj-$(CONFIG_DRM_PANEL_RENESAS_R69328) += panel-renesas-r69328.o
+ obj-$(CONFIG_DRM_PANEL_RONBO_RB070D30) += panel-ronbo-rb070d30.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_AMS581VF01) += panel-samsung-ams581vf01.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_AMS639RQ08) += panel-samsung-ams639rq08.o
++obj-$(CONFIG_DRM_PANEL_SAMSUNG_AMS662ZS01) += panel-samsung-ams662zs01.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_ATNA33XC20) += panel-samsung-atna33xc20.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_DB7430) += panel-samsung-db7430.o
+ obj-$(CONFIG_DRM_PANEL_SAMSUNG_LD9040) += panel-samsung-ld9040.o
+diff --git a/drivers/gpu/drm/panel/panel-samsung-ams662zs01.c b/drivers/gpu/drm/panel/panel-samsung-ams662zs01.c
+new file mode 100644
+index 000000000..7cb2bf5e9
+--- /dev/null
++++ b/drivers/gpu/drm/panel/panel-samsung-ams662zs01.c
+@@ -0,0 +1,301 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung AMS662ZS01 1080x2400 FHD+ AMOLED DSI Command Mode + DSC panel driver
++ * Verified against realme GT Neo 2 (RMX3370 / bitra) stock runtime device tree
++ * (qcom,mdss_dsi_oppo21619samsung_ams662zs01_1080_2400_cmd_id13).
++ */
++
++#include <linux/backlight.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/regulator/consumer.h>
++
++#include <video/mipi_display.h>
++
++#include <drm/display/drm_dsc.h>
++#include <drm/drm_mipi_dsi.h>
++#include <drm/drm_modes.h>
++#include <drm/drm_panel.h>
++#include <drm/drm_probe_helper.h>
++
++struct ams662zs01 {
++	struct drm_panel panel;
++	struct mipi_dsi_device *dsi;
++	struct drm_dsc_config dsc;
++	struct gpio_desc *reset_gpio;
++	struct gpio_desc *vout_gpio;
++	struct regulator_bulk_data *supplies;
++};
++
++static const struct regulator_bulk_data ams662zs01_supplies[] = {
++	{ .supply = "vddio" },
++	{ .supply = "vci" },
++	{ .supply = "vddr" },
++};
++
++static inline struct ams662zs01 *to_ams662zs01(struct drm_panel *panel)
++{
++	return container_of(panel, struct ams662zs01, panel);
++}
++
++static void ams662zs01_reset(struct ams662zs01 *ctx)
++{
++	/* Stock sequence: 1 (10ms) -> 0 (10ms) -> 1 (10ms); GPIO is ACTIVE_LOW */
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 11000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	usleep_range(10000, 11000);
++	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	usleep_range(10000, 11000);
++}
++
++static int ams662zs01_on(struct ams662zs01 *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++
++	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 128);
++
++	/* Samsung PPS write (DCS 0x9e): DSC 1.1, 8bpc, 8bpp, 1080x2400, 540x30 slices */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9e,
++		0x11, 0x00, 0x00, 0x89, 0x30, 0x80, 0x09, 0x60,
++		0x04, 0x38, 0x00, 0x1e, 0x02, 0x1c, 0x02, 0x1c,
++		0x02, 0x00, 0x02, 0x0e, 0x00, 0x20, 0x02, 0xe3,
++		0x00, 0x07, 0x00, 0x0c, 0x03, 0x50, 0x03, 0x64,
++		0x18, 0x00, 0x10, 0xf0, 0x03, 0x0c, 0x20, 0x00,
++		0x06, 0x0b, 0x0b, 0x33, 0x0e, 0x1c, 0x2a, 0x38,
++		0x46, 0x54, 0x62, 0x69, 0x70, 0x77, 0x79, 0x7b,
++		0x7d, 0x7e, 0x01, 0x02, 0x01, 0x00, 0x09, 0x40,
++		0x09, 0xbe, 0x19, 0xfc, 0x19, 0xfa, 0x19, 0xf8,
++		0x1a, 0x38, 0x1a, 0x78, 0x1a, 0xb6, 0x2a, 0xf6,
++		0x2b, 0x34, 0x2b, 0x74, 0x3b, 0x74, 0x6b, 0xf4,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xc2, 0x14);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x9d, 0x01); /* DSC enable */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_TEAR_ON, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_COLUMN_ADDRESS, 0x00, 0x00, 0x04, 0x37);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_PAGE_ADDRESS, 0x00, 0x00, 0x09, 0x5f);
++
++	/* Unlock level 2, configure F2 & 60Hz timing, update latch, re-lock */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xb0, 0x27, 0xf2);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf2, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x60, 0x00, 0x00); /* 60Hz */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf7, 0x0f);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_POWER_SAVE, 0x00);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_BRIGHTNESS, 0x02, 0x00);
++	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
++
++	return dsi_ctx.accum_err;
++}
++
++static int ams662zs01_off(struct ams662zs01 *ctx)
++{
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0x5a, 0x5a);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0x91, 0x02);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x20);
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, 0xf0, 0xa5, 0xa5);
++	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 16);
++	mipi_dsi_dcs_enter_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 128);
++
++	return dsi_ctx.accum_err;
++}
++
++static int ams662zs01_prepare(struct drm_panel *panel)
++{
++	struct ams662zs01 *ctx = to_ams662zs01(panel);
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(ams662zs01_supplies), ctx->supplies);
++	if (ret < 0)
++		return ret;
++
++	if (ctx->vout_gpio)
++		gpiod_set_value_cansleep(ctx->vout_gpio, 1);
++
++	usleep_range(10000, 12000);
++	ams662zs01_reset(ctx);
++
++	ret = ams662zs01_on(ctx);
++	if (ret < 0) {
++		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++		if (ctx->vout_gpio)
++			gpiod_set_value_cansleep(ctx->vout_gpio, 0);
++		regulator_bulk_disable(ARRAY_SIZE(ams662zs01_supplies), ctx->supplies);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int ams662zs01_unprepare(struct drm_panel *panel)
++{
++	struct ams662zs01 *ctx = to_ams662zs01(panel);
++
++	ams662zs01_off(ctx);
++
++	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
++	if (ctx->vout_gpio)
++		gpiod_set_value_cansleep(ctx->vout_gpio, 0);
++
++	regulator_bulk_disable(ARRAY_SIZE(ams662zs01_supplies), ctx->supplies);
++
++	return 0;
++}
++
++static const struct drm_display_mode ams662zs01_mode_60hz = {
++	.clock = (1080 + 540 + 10 + 40) * (2400 + 21 + 2 + 9) * 60 / 1000,
++	.hdisplay = 1080,
++	.hsync_start = 1080 + 540,
++	.hsync_end = 1080 + 540 + 10,
++	.htotal = 1080 + 540 + 10 + 40,
++	.vdisplay = 2400,
++	.vsync_start = 2400 + 21,
++	.vsync_end = 2400 + 21 + 2,
++	.vtotal = 2400 + 21 + 2 + 9,
++	.width_mm = 70,
++	.height_mm = 153,
++	.type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED,
++};
++
++static int ams662zs01_get_modes(struct drm_panel *panel,
++				struct drm_connector *connector)
++{
++	return drm_connector_helper_get_modes_fixed(connector, &ams662zs01_mode_60hz);
++}
++
++static const struct drm_panel_funcs ams662zs01_panel_funcs = {
++	.prepare = ams662zs01_prepare,
++	.unprepare = ams662zs01_unprepare,
++	.get_modes = ams662zs01_get_modes,
++};
++
++static int ams662zs01_bl_update_status(struct backlight_device *bl)
++{
++	struct mipi_dsi_device *dsi = bl_get_data(bl);
++	u16 brightness = backlight_get_brightness(bl);
++	u8 payload[2] = { (brightness >> 8) & 0x0f, brightness & 0xff };
++	int ret;
++
++	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS, payload, sizeof(payload));
++	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++
++	return ret < 0 ? ret : 0;
++}
++
++static const struct backlight_ops ams662zs01_bl_ops = {
++	.update_status = ams662zs01_bl_update_status,
++};
++
++static struct backlight_device *ams662zs01_create_backlight(struct mipi_dsi_device *dsi)
++{
++	const struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.brightness = 512,
++		.max_brightness = 2047,
++	};
++
++	return devm_backlight_device_register(&dsi->dev, dev_name(&dsi->dev),
++					      &dsi->dev, dsi, &ams662zs01_bl_ops, &props);
++}
++
++static int ams662zs01_probe(struct mipi_dsi_device *dsi)
++{
++	struct device *dev = &dsi->dev;
++	struct ams662zs01 *ctx;
++	int ret;
++
++	ctx = devm_drm_panel_alloc(dev, struct ams662zs01, panel,
++				   &ams662zs01_panel_funcs,
++				   DRM_MODE_CONNECTOR_DSI);
++	if (IS_ERR(ctx))
++		return PTR_ERR(ctx);
++
++	ret = devm_regulator_bulk_get_const(dev, ARRAY_SIZE(ams662zs01_supplies),
++					    ams662zs01_supplies, &ctx->supplies);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "Failed to get regulators\n");
++
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
++				     "Failed to get reset-gpios\n");
++
++	ctx->vout_gpio = devm_gpiod_get_optional(dev, "vout", GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->vout_gpio))
++		return dev_err_probe(dev, PTR_ERR(ctx->vout_gpio),
++				     "Failed to get vout-gpios\n");
++
++	ctx->dsi = dsi;
++	mipi_dsi_set_drvdata(dsi, ctx);
++
++	dsi->lanes = 4;
++	dsi->format = MIPI_DSI_FMT_RGB888;
++	dsi->mode_flags = MIPI_DSI_CLOCK_NON_CONTINUOUS | MIPI_DSI_MODE_LPM;
++
++	ctx->panel.prepare_prev_first = true;
++	ctx->panel.backlight = ams662zs01_create_backlight(dsi);
++	if (IS_ERR(ctx->panel.backlight))
++		return dev_err_probe(dev, PTR_ERR(ctx->panel.backlight),
++				     "Failed to create backlight\n");
++
++	ret = devm_drm_panel_add(dev, &ctx->panel);
++	if (ret < 0)
++		return ret;
++
++	dsi->dsc = &ctx->dsc;
++	ctx->dsc.dsc_version_major = 1;
++	ctx->dsc.dsc_version_minor = 1;
++	ctx->dsc.slice_height = 30;
++	ctx->dsc.slice_width = 540;
++	ctx->dsc.slice_count = 1080 / 540;
++	ctx->dsc.bits_per_component = 8;
++	ctx->dsc.bits_per_pixel = 8 << 4;
++	ctx->dsc.block_pred_enable = true;
++
++	ret = devm_mipi_dsi_attach(dev, dsi);
++	if (ret < 0)
++		return dev_err_probe(dev, ret, "Failed to attach to DSI host\n");
++
++	return 0;
++}
++
++static const struct of_device_id ams662zs01_of_match[] = {
++	{ .compatible = "samsung,ams662zs01" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, ams662zs01_of_match);
++
++static struct mipi_dsi_driver ams662zs01_driver = {
++	.probe = ams662zs01_probe,
++	.driver = {
++		.name = "panel-samsung-ams662zs01",
++		.of_match_table = ams662zs01_of_match,
++	},
++};
++module_mipi_dsi_driver(ams662zs01_driver);
++
++MODULE_DESCRIPTION("DRM driver for Samsung AMS662ZS01 FHD+ AMOLED DSC panel");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index 9b9ae8ac3..e9da8a2dc 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -1414,4 +1414,11 @@ config TOUCHSCREEN_HIMAX_HX83112B
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called himax_hx83112b.
+ 
++config TOUCHSCREEN_SYNAPTICS_TCM_I2C
++	tristate "Synaptics TouchComm (TCM) I2C touchscreen (S3908)"
++	depends on I2C
++	help
++	  Say Y here if you have a Synaptics TouchComm gen-1 I2C touchscreen
++	  controller such as the S3908.
++
+ endif
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index bfd9de833..6bc8ba480 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -119,3 +119,4 @@ obj-$(CONFIG_TOUCHSCREEN_IQS5XX)	+= iqs5xx.o
+ obj-$(CONFIG_TOUCHSCREEN_IQS7211)	+= iqs7211.o
+ obj-$(CONFIG_TOUCHSCREEN_ZINITIX)	+= zinitix.o
+ obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83112B)	+= himax_hx83112b.o
++obj-$(CONFIG_TOUCHSCREEN_SYNAPTICS_TCM_I2C)	+= synaptics_tcm_i2c.o
+diff --git a/drivers/input/touchscreen/synaptics_tcm_i2c.c b/drivers/input/touchscreen/synaptics_tcm_i2c.c
+new file mode 100644
+index 000000000..5c8914a39
+--- /dev/null
++++ b/drivers/input/touchscreen/synaptics_tcm_i2c.c
+@@ -0,0 +1,576 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Synaptics TouchComm (TCM) gen-1 I2C touchscreen driver (e.g. S3908)
++ * Clean mainline implementation verified against RMX3370 on-cell S3908 protocol.
++ */
++
++#include <linux/completion.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++#include <linux/interrupt.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/pm.h>
++#include <linux/regulator/consumer.h>
++#include <linux/slab.h>
++#include <linux/unaligned.h>
++
++#define TCM_MARKER			0xa5
++#define TCM_PADDING			0x5a
++#define TCM_HDR_SIZE			4
++#define TCM_MAX_BUF			1024
++#define TCM_MAX_OBJECTS			10
++#define TCM_CMD_TIMEOUT_MS		1000
++
++#define TCM_STATUS_IDLE			0x00
++#define TCM_STATUS_OK			0x01
++#define TCM_STATUS_BUSY			0x02
++#define TCM_STATUS_CONTINUED_READ	0x03
++#define TCM_STATUS_ERROR		0x0f
++
++#define TCM_REPORT_IDENTIFY		0x10
++#define TCM_REPORT_TOUCH		0x11
++
++#define TCM_CMD_IDENTIFY		0x02
++#define TCM_CMD_ENABLE_REPORT		0x05
++#define TCM_CMD_DISABLE_REPORT		0x06
++#define TCM_CMD_RUN_APP_FW		0x14
++#define TCM_CMD_GET_APP_INFO		0x20
++#define TCM_CMD_GET_TOUCH_REPORT_CFG	0x25
++#define TCM_CMD_ENTER_DEEP_SLEEP	0x2c
++#define TCM_CMD_EXIT_DEEP_SLEEP		0x2d
++
++#define TCM_MODE_APPLICATION		0x01
++
++enum tcm_report_code {
++	TOUCH_END = 0,
++	TOUCH_FOREACH_ACTIVE_OBJECT = 1,
++	TOUCH_FOREACH_OBJECT = 2,
++	TOUCH_FOREACH_END = 3,
++	TOUCH_PAD_TO_NEXT_BYTE = 4,
++	TOUCH_TIMESTAMP = 5,
++	TOUCH_OBJECT_N_INDEX = 6,
++	TOUCH_OBJECT_N_CLASSIFICATION = 7,
++	TOUCH_OBJECT_N_X_POSITION = 8,
++	TOUCH_OBJECT_N_Y_POSITION = 9,
++	TOUCH_OBJECT_N_Z = 10,
++	TOUCH_OBJECT_N_X_WIDTH = 11,
++	TOUCH_OBJECT_N_Y_WIDTH = 12,
++	TOUCH_OBJECT_N_TX_POS = 13,
++	TOUCH_OBJECT_N_RX_POS = 14,
++	TOUCH_0D_BUTTONS_STATE = 15,
++	TOUCH_GESTURE_DOUBLE_TAP = 16,
++	TOUCH_FRAME_RATE = 17,
++	TOUCH_POWER_IM = 18,
++	TOUCH_CID_IM = 19,
++	TOUCH_RAIL_IM = 20,
++	TOUCH_CID_VARIANCE_IM = 21,
++	TOUCH_NSM_FREQUENCY = 22,
++	TOUCH_NSM_STATE = 23,
++	TOUCH_NUM_OF_ACTIVE_OBJECTS = 24,
++	TOUCH_NUM_OF_CPU_CYCLES = 25,
++};
++
++struct tcm_obj {
++	u8 status;
++	u16 x;
++	u16 y;
++	u16 z;
++	u16 wx;
++	u16 wy;
++};
++
++struct syna_tcm {
++	struct i2c_client *client;
++	struct input_dev *input;
++	struct touchscreen_properties prop;
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data supplies[2];
++
++	struct mutex cmd_lock;
++	struct mutex rw_lock;
++	struct completion cmd_done;
++	u8 cmd_status;
++	u8 resp_buf[TCM_MAX_BUF];
++	u16 resp_len;
++
++	u8 rx_buf[TCM_MAX_BUF];
++	u8 cont_buf[TCM_MAX_BUF];
++	u8 report_cfg[256];
++	u16 report_cfg_len;
++
++	u16 max_x;
++	u16 max_y;
++	u8 max_objects;
++	bool ready;
++};
++
++static int syna_tcm_read_msg(struct syna_tcm *tcm, u8 *code_out, u8 *payload, u16 *len_out)
++{
++	u8 hdr[TCM_HDR_SIZE];
++	u16 payload_len, rem;
++	int ret;
++
++	mutex_lock(&tcm->rw_lock);
++	ret = i2c_master_recv(tcm->client, hdr, sizeof(hdr));
++	if (ret != sizeof(hdr)) {
++		mutex_unlock(&tcm->rw_lock);
++		return ret < 0 ? ret : -EIO;
++	}
++
++	if (hdr[0] != TCM_MARKER) {
++		if (!tcm->ready)
++			dev_dbg(&tcm->client->dev, "tcm bad marker: %4ph\n", hdr);
++		mutex_unlock(&tcm->rw_lock);
++		return -ENXIO;
++	}
++
++	*code_out = hdr[1];
++	payload_len = get_unaligned_le16(&hdr[2]);
++	if (!tcm->ready)
++		dev_dbg(&tcm->client->dev, "tcm rx hdr: code=0x%02x len=%u\n", *code_out, payload_len);
++
++	if (*code_out == TCM_STATUS_IDLE || *code_out == TCM_STATUS_BUSY ||
++	    *code_out == TCM_STATUS_CONTINUED_READ || payload_len == 0) {
++		*len_out = 0;
++		mutex_unlock(&tcm->rw_lock);
++		return 0;
++	}
++
++	if (payload_len > TCM_MAX_BUF - 3) {
++		mutex_unlock(&tcm->rw_lock);
++		return -EMSGSIZE;
++	}
++
++	rem = payload_len + 3;
++	ret = i2c_master_recv(tcm->client, tcm->cont_buf, rem);
++	if (ret != rem) {
++		mutex_unlock(&tcm->rw_lock);
++		return ret < 0 ? ret : -EIO;
++	}
++
++	if (tcm->cont_buf[0] != TCM_MARKER || tcm->cont_buf[1] != TCM_STATUS_CONTINUED_READ) {
++		if (!tcm->ready)
++			dev_info(&tcm->client->dev, "tcm cont bad hdr: %4ph\n", tcm->cont_buf);
++		mutex_unlock(&tcm->rw_lock);
++		return -EIO;
++	}
++
++	memcpy(payload, &tcm->cont_buf[2], payload_len);
++	*len_out = payload_len;
++	mutex_unlock(&tcm->rw_lock);
++	return 0;
++}
++
++static int syna_tcm_send_cmd(struct syna_tcm *tcm, u8 cmd, const u8 *data, u16 data_len,
++			     u8 *resp, u16 *resp_len)
++{
++	u8 tx[64];
++	int ret;
++
++	if (data_len + 3 > sizeof(tx))
++		return -EINVAL;
++
++	mutex_lock(&tcm->cmd_lock);
++	reinit_completion(&tcm->cmd_done);
++	tcm->cmd_status = 0xff;
++	tcm->resp_len = 0;
++
++	tx[0] = cmd;
++	put_unaligned_le16(data_len, &tx[1]);
++	if (data_len && data)
++		memcpy(&tx[3], data, data_len);
++
++	mutex_lock(&tcm->rw_lock);
++	ret = i2c_master_send(tcm->client, tx, data_len + 3);
++	mutex_unlock(&tcm->rw_lock);
++	if (ret != data_len + 3) {
++		mutex_unlock(&tcm->cmd_lock);
++		return ret < 0 ? ret : -EIO;
++	}
++
++	if (!wait_for_completion_timeout(&tcm->cmd_done, msecs_to_jiffies(TCM_CMD_TIMEOUT_MS))) {
++		mutex_unlock(&tcm->cmd_lock);
++		return -ETIMEDOUT;
++	}
++
++	if (tcm->cmd_status != TCM_STATUS_OK) {
++		ret = -EIO;
++	} else {
++		if (resp && resp_len) {
++			u16 n = min_t(u16, tcm->resp_len, *resp_len);
++			memcpy(resp, tcm->resp_buf, n);
++			*resp_len = n;
++		}
++		ret = 0;
++	}
++
++	mutex_unlock(&tcm->cmd_lock);
++	return ret;
++}
++
++static u32 tcm_get_bits(const u8 *buf, u16 buf_len, u32 bit_off, u8 bits)
++{
++	u32 val = 0;
++	u8 i;
++
++	for (i = 0; i < bits && i < 32; i++) {
++		u32 byte_idx = (bit_off + i) / 8;
++		u8 bit_idx = (bit_off + i) % 8;
++		if (byte_idx < buf_len && (buf[byte_idx] & BIT(bit_idx)))
++			val |= BIT(i);
++	}
++	return val;
++}
++
++static void syna_tcm_parse_touch(struct syna_tcm *tcm, const u8 *buf, u16 len)
++{
++	struct tcm_obj objs[TCM_MAX_OBJECTS];
++	bool active_only = false, has_active_cnt = false;
++	u32 active_cnt = 0, seen_objs = 0, obj = 0;
++	u32 off = 0, next_idx = 0, idx = 0;
++	u8 code, bits;
++	int i;
++
++	if (!tcm->ready || !tcm->report_cfg_len)
++		return;
++
++	memset(objs, 0, sizeof(objs));
++
++	while (idx < tcm->report_cfg_len) {
++		code = tcm->report_cfg[idx++];
++		switch (code) {
++		case TOUCH_END:
++			goto report_input;
++		case TOUCH_FOREACH_ACTIVE_OBJECT:
++			obj = 0;
++			seen_objs = 0;
++			next_idx = idx;
++			active_only = true;
++			break;
++		case TOUCH_FOREACH_OBJECT:
++			obj = 0;
++			next_idx = idx;
++			active_only = false;
++			break;
++		case TOUCH_FOREACH_END:
++			if (active_only) {
++				if (has_active_cnt) {
++					seen_objs++;
++					if (seen_objs < active_cnt)
++						idx = next_idx;
++				} else if (off + 8 <= (u32)len * 8) {
++					idx = next_idx;
++				}
++			} else {
++				obj++;
++				if (obj < tcm->max_objects)
++					idx = next_idx;
++			}
++			break;
++		case TOUCH_PAD_TO_NEXT_BYTE:
++			off = round_up(off, 8);
++			break;
++		case TOUCH_NUM_OF_ACTIVE_OBJECTS:
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			active_cnt = tcm_get_bits(buf, len, off, bits);
++			has_active_cnt = true;
++			off += bits;
++			break;
++		case TOUCH_OBJECT_N_INDEX:
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			obj = tcm_get_bits(buf, len, off, bits);
++			off += bits;
++			break;
++		case TOUCH_OBJECT_N_CLASSIFICATION:
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			if (obj < TCM_MAX_OBJECTS)
++				objs[obj].status = tcm_get_bits(buf, len, off, bits);
++			off += bits;
++			break;
++		case TOUCH_OBJECT_N_X_POSITION:
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			if (obj < TCM_MAX_OBJECTS)
++				objs[obj].x = tcm_get_bits(buf, len, off, bits);
++			off += bits;
++			break;
++		case TOUCH_OBJECT_N_Y_POSITION:
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			if (obj < TCM_MAX_OBJECTS)
++				objs[obj].y = tcm_get_bits(buf, len, off, bits);
++			off += bits;
++			break;
++		case TOUCH_OBJECT_N_Z:
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			if (obj < TCM_MAX_OBJECTS)
++				objs[obj].z = tcm_get_bits(buf, len, off, bits);
++			off += bits;
++			break;
++		case TOUCH_OBJECT_N_X_WIDTH:
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			if (obj < TCM_MAX_OBJECTS)
++				objs[obj].wx = tcm_get_bits(buf, len, off, bits);
++			off += bits;
++			break;
++		case TOUCH_OBJECT_N_Y_WIDTH:
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			if (obj < TCM_MAX_OBJECTS)
++				objs[obj].wy = tcm_get_bits(buf, len, off, bits);
++			off += bits;
++			break;
++		default:
++			/* Any other field carries a 1-byte bit-width specifier */
++			if (idx >= tcm->report_cfg_len)
++				goto report_input;
++			bits = tcm->report_cfg[idx++];
++			off += bits;
++			break;
++		}
++	}
++
++report_input:
++	for (i = 0; i < tcm->max_objects; i++) {
++		bool down = (objs[i].status == 1 || objs[i].status == 2);
++
++		input_mt_slot(tcm->input, i);
++		input_mt_report_slot_state(tcm->input, MT_TOOL_FINGER, down);
++		if (down) {
++			touchscreen_report_pos(tcm->input, &tcm->prop, objs[i].x, objs[i].y, true);
++			input_report_abs(tcm->input, ABS_MT_TOUCH_MAJOR, max(objs[i].wx, objs[i].wy));
++			input_report_abs(tcm->input, ABS_MT_TOUCH_MINOR, min(objs[i].wx, objs[i].wy));
++			input_report_abs(tcm->input, ABS_MT_PRESSURE, objs[i].z ? objs[i].z : 50);
++		}
++	}
++	input_mt_sync_frame(tcm->input);
++	input_sync(tcm->input);
++}
++
++static irqreturn_t syna_tcm_irq(int irq, void *data)
++{
++	struct syna_tcm *tcm = data;
++	u8 code = 0;
++	u16 len = 0;
++	int ret;
++
++	ret = syna_tcm_read_msg(tcm, &code, tcm->rx_buf, &len);
++	if (ret < 0)
++		return IRQ_HANDLED;
++
++	if (code == TCM_REPORT_TOUCH) {
++		syna_tcm_parse_touch(tcm, tcm->rx_buf, len);
++	} else if (code == TCM_REPORT_IDENTIFY) {
++		/* Ignore spontaneous identify report during boot */
++	} else if (code == TCM_STATUS_OK || (code >= 0x0c && code <= TCM_STATUS_ERROR)) {
++		tcm->cmd_status = code;
++		tcm->resp_len = len;
++		if (len)
++			memcpy(tcm->resp_buf, tcm->rx_buf, len);
++		complete(&tcm->cmd_done);
++	}
++
++	return IRQ_HANDLED;
++}
++
++static int syna_tcm_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct syna_tcm *tcm;
++	u8 id_buf[32], app_buf[64];
++	u16 len;
++	u8 report_id = TCM_REPORT_TOUCH;
++	int ret;
++
++	tcm = devm_kzalloc(dev, sizeof(*tcm), GFP_KERNEL);
++	if (!tcm)
++		return -ENOMEM;
++
++	tcm->client = client;
++	i2c_set_clientdata(client, tcm);
++	mutex_init(&tcm->cmd_lock);
++	mutex_init(&tcm->rw_lock);
++	init_completion(&tcm->cmd_done);
++
++	tcm->supplies[0].supply = "vdd";
++	tcm->supplies[1].supply = "vddio";
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(tcm->supplies), tcm->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to get regulators\n");
++
++	tcm->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(tcm->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(tcm->reset_gpio), "Failed to get reset GPIO\n");
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(tcm->supplies), tcm->supplies);
++	if (ret)
++		return ret;
++
++	if (tcm->reset_gpio) {
++		usleep_range(10000, 11000);
++		gpiod_set_value_cansleep(tcm->reset_gpio, 0); /* deassert ACTIVE_LOW reset */
++		msleep(90);
++	}
++
++	ret = devm_request_threaded_irq(dev, client->irq, NULL, syna_tcm_irq,
++					IRQF_ONESHOT, dev_name(dev), tcm);
++	if (ret) {
++		dev_err(dev, "Failed to request IRQ %d: %d\n", client->irq, ret);
++		goto err_reg;
++	}
++
++	msleep(50);
++
++	/* 1. Identify device & ensure Application firmware mode */
++	len = sizeof(id_buf);
++	memset(id_buf, 0, sizeof(id_buf));
++	ret = syna_tcm_send_cmd(tcm, TCM_CMD_IDENTIFY, NULL, 0, id_buf, &len);
++	if (ret) {
++		dev_err(dev, "CMD_IDENTIFY failed: %d\n", ret);
++		goto err_reg;
++	}
++
++	if (id_buf[1] != TCM_MODE_APPLICATION) {
++		dev_info(dev, "Touch in mode 0x%02x, switching to application firmware...\n", id_buf[1]);
++		syna_tcm_send_cmd(tcm, TCM_CMD_RUN_APP_FW, NULL, 0, NULL, NULL);
++		msleep(90);
++		len = sizeof(id_buf);
++		ret = syna_tcm_send_cmd(tcm, TCM_CMD_IDENTIFY, NULL, 0, id_buf, &len);
++		if (ret || id_buf[1] != TCM_MODE_APPLICATION) {
++			dev_err(dev, "Failed to enter app mode (ret=%d mode=0x%02x)\n", ret, id_buf[1]);
++			ret = ret ? ret : -EIO;
++			goto err_reg;
++		}
++	}
++
++	/* 2. Query application info (max_x, max_y, max_objects) */
++	len = sizeof(app_buf);
++	memset(app_buf, 0, sizeof(app_buf));
++	ret = syna_tcm_send_cmd(tcm, TCM_CMD_GET_APP_INFO, NULL, 0, app_buf, &len);
++	if (ret || len < 38) {
++		dev_err(dev, "CMD_GET_APP_INFO failed: ret=%d len=%u\n", ret, len);
++		ret = ret ? ret : -EIO;
++		goto err_reg;
++	}
++
++	tcm->max_x = get_unaligned_le16(&app_buf[32]);
++	tcm->max_y = get_unaligned_le16(&app_buf[34]);
++	tcm->max_objects = clamp_t(u16, get_unaligned_le16(&app_buf[36]), 1, TCM_MAX_OBJECTS);
++
++	/* 3. Query dynamic touch report configuration */
++	len = sizeof(tcm->report_cfg);
++	ret = syna_tcm_send_cmd(tcm, TCM_CMD_GET_TOUCH_REPORT_CFG, NULL, 0, tcm->report_cfg, &len);
++	if (ret || !len) {
++		dev_err(dev, "CMD_GET_TOUCH_REPORT_CFG failed: ret=%d len=%u\n", ret, len);
++		ret = ret ? ret : -EIO;
++		goto err_reg;
++	}
++	tcm->report_cfg_len = len;
++
++	/* 4. Register Linux input_mt device */
++	tcm->input = devm_input_allocate_device(dev);
++	if (!tcm->input) {
++		ret = -ENOMEM;
++		goto err_reg;
++	}
++
++	tcm->input->name = "Synaptics S3908 Touchscreen";
++	tcm->input->id.bustype = BUS_I2C;
++	tcm->input->dev.parent = dev;
++
++	input_set_abs_params(tcm->input, ABS_MT_POSITION_X, 0, tcm->max_x ? tcm->max_x : 1079, 0, 0);
++	input_set_abs_params(tcm->input, ABS_MT_POSITION_Y, 0, tcm->max_y ? tcm->max_y : 2399, 0, 0);
++	input_set_abs_params(tcm->input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++	input_set_abs_params(tcm->input, ABS_MT_TOUCH_MINOR, 0, 255, 0, 0);
++	input_set_abs_params(tcm->input, ABS_MT_PRESSURE, 0, 255, 0, 0);
++	touchscreen_parse_properties(tcm->input, true, &tcm->prop);
++
++	ret = input_mt_init_slots(tcm->input, tcm->max_objects, INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	if (ret)
++		goto err_reg;
++
++	ret = input_register_device(tcm->input);
++	if (ret)
++		goto err_reg;
++
++	tcm->ready = true;
++	syna_tcm_send_cmd(tcm, TCM_CMD_ENABLE_REPORT, &report_id, 1, NULL, NULL);
++
++	dev_info(dev, "Synaptics TCM %.16s ready (build=%u, %ux%u, max_fingers=%u, cfg=%uB)\n",
++		 &id_buf[2], get_unaligned_le32(&id_buf[18]),
++		 tcm->max_x, tcm->max_y, tcm->max_objects, tcm->report_cfg_len);
++	return 0;
++
++err_reg:
++	regulator_bulk_disable(ARRAY_SIZE(tcm->supplies), tcm->supplies);
++	return ret;
++}
++
++static void syna_tcm_remove(struct i2c_client *client)
++{
++	struct syna_tcm *tcm = i2c_get_clientdata(client);
++	u8 report_id = TCM_REPORT_TOUCH;
++
++	tcm->ready = false;
++	syna_tcm_send_cmd(tcm, TCM_CMD_DISABLE_REPORT, &report_id, 1, NULL, NULL);
++	regulator_bulk_disable(ARRAY_SIZE(tcm->supplies), tcm->supplies);
++}
++
++static int syna_tcm_suspend(struct device *dev)
++{
++	struct syna_tcm *tcm = dev_get_drvdata(dev);
++
++	syna_tcm_send_cmd(tcm, TCM_CMD_ENTER_DEEP_SLEEP, NULL, 0, NULL, NULL);
++	disable_irq(tcm->client->irq);
++	return 0;
++}
++
++static int syna_tcm_resume(struct device *dev)
++{
++	struct syna_tcm *tcm = dev_get_drvdata(dev);
++
++	enable_irq(tcm->client->irq);
++	syna_tcm_send_cmd(tcm, TCM_CMD_EXIT_DEEP_SLEEP, NULL, 0, NULL, NULL);
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(syna_tcm_pm_ops, syna_tcm_suspend, syna_tcm_resume);
++
++static const struct of_device_id syna_tcm_of_match[] = {
++	{ .compatible = "syna,s3908" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, syna_tcm_of_match);
++
++static struct i2c_driver syna_tcm_driver = {
++	.probe = syna_tcm_probe,
++	.remove = syna_tcm_remove,
++	.driver = {
++		.name = "synaptics-tcm-i2c",
++		.of_match_table = syna_tcm_of_match,
++		.pm = pm_sleep_ptr(&syna_tcm_pm_ops),
++	},
++};
++module_i2c_driver(syna_tcm_driver);
++
++MODULE_DESCRIPTION("Synaptics TouchComm (TCM) gen-1 I2C touchscreen driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/soc/qcom/ubwc_config.c b/drivers/soc/qcom/ubwc_config.c
+index a4d8769f8..2f37111ef 100644
+--- a/drivers/soc/qcom/ubwc_config.c
++++ b/drivers/soc/qcom/ubwc_config.c
+@@ -171,6 +171,7 @@ static const struct of_device_id qcom_ubwc_configs[] __maybe_unused = {
+ 	{ .compatible = "qcom,sm7325", .data = &ubwc_3_1_hbb14, },
+ 	{ .compatible = "qcom,sm8150", .data = &ubwc_3_0_hbb15, },
+ 	{ .compatible = "qcom,sm8250", .data = &ubwc_4_0_hbb16, },
++	{ .compatible = "qcom,kona", .data = &ubwc_4_0_hbb16, },
+ 	{ .compatible = "qcom,sm8350", .data = &ubwc_4_0_hbb16, },
+ 	{ .compatible = "qcom,sm8450", .data = &ubwc_4_0_hbb16, },
+ 	{ .compatible = "qcom,sm8550", .data = &ubwc_4_0_hbb16, },
+-- 
+2.43.0
+

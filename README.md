@@ -6,10 +6,10 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 - **[Build, Package & Flash Guide](docs/build-and-flash.md)** — Complete step-by-step instructions from upstream Linux source to cold-booting Ubuntu 24.04.5 LTS Server, Wi-Fi 6 setup, anti-swelling charge control, and recovery.
 - **[Bring-Up Pitfalls & Debugging Notes](docs/pitfalls-and-debugging.md)** — Every real RMX3370 hardware/bootloader/initramfs pitfall hit during development (with root causes, `pstore` evidence, and exact fixes).
 - **[Hardware & Milestone Status](docs/status.md)** — Live bring-up checklist and verified hardware capabilities.
-- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra10`).
+- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra11`).
 - **[Technical Debt Tracker](docs/tech-debt.md)** — Known temporary workarounds and exit criteria.
 
-## Verified Working Hardware (`7.4.0-rc3-bitra9`, Flashed & Cold-Boot Verified)
+## Verified Working Hardware (`7.4.0-rc3-bitra11` + `bitra-device-support 1.0`)
 
 | Subsystem | Hardware / Driver | Status | Notes |
 |---|---|---|---|
@@ -20,7 +20,11 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | Wi-Fi 6 | Qualcomm `QCA6390` (`ath11k_pci` over PCIe0) | **Working** | 2.4/5 GHz 802.11ax HE via `NetworkManager`; deterministic MAC udev rule; device-local firmware |
 | Battery Fuel Gauge | `TI BQ28Z610` (`bq27xxx`, `i2c16@0x55`) | **Working** | 2S pack voltage (~7.4–8.8 V), current, SOC, cycle count, temperature |
 | 2S Charger & Anti-Swelling | `MPS MP2650` (`mp2650_charger`, `i2c5@0x5c`) | **Working** | Upstream `charge_behaviour` (`auto`, `inhibit-charge` USB bypass, `force-discharge` HIZ) + 60s systemd timer (`55%–75%` band) |
-| OLED Screen-Off | `vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15` | **Working** | RPMh `regulator_late_cleanup` powers off OLED physically at boot + 31s (~1.5 W idle, 0 burn-in) |
+| Native OLED Display & Anti-Burn-In | Samsung `AMS662ZS01` (`panel-samsung-ams662zs01`, `1080x2400 @ 60 Hz`, DSC 1.1) | **Working** | Native DSI command-mode OLED + 12-bit DCS backlight (`0..2047`) + true DPMS power-off (`bitra-oled-blank.service` auto-blanks on headless boot) |
+| GPU (3D / Vulkan) | Qualcomm `Adreno 650` (`msm` + `GMU` + `freedreno` / `Turnip`) | **Working** | Mesa OpenGL 4.6 / ES 3.2 (`FD650`) + Vulkan (`Turnip`); uses stock device-signed `a650_zap.mbn` + upstream `a650_sqe.fw`/`a650_gmu.bin` |
+| Touchscreen | `Synaptics S3908` (`synaptics_tcm_i2c`, `i2c13@0x4b`) | **Working** | Native TouchComm v1 I2C driver, 10-finger multitouch (`8639x19199` subpixel native) |
+| Hardware Buttons | Power (`pm8941_pwrkey`), Volume Up/Down (`pm8150` GPIO 6/7) | **Working** | All three physical side buttons report standard Linux input keycodes |
+| Optional Touch Desktop | `Phosh` + `phoc` Wayland (`bitra-desktop`) | **Working (Optional)** | Headless `multi-user.target` by default; start/stop on demand via `sudo bitra-desktop start` / `stop` |
 | Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, Docker (`overlayfs`, `cgroup2fs`, `iptables-nft` NAT/bridge), AppArmor, `wireguard`, `nf_tables` |
 | USB Host / OTG | `pm8150b_typec` + `usb_1_dwc3` OTG + MP2650 5V boost | **Working** | Dual-role Type-C + 5V/1.25A OTG boost; verified with external USB hard drive |
 | Built-in 5G Modem + SMS + 5G Data | `SDX55M` (PCIe2 MHI + Sahara + EFS Sync + `tqftpserv-sdx55` + QMI-over-QRTR + `rmnet` + `ModemManager`) | **Working** | Cold-boots AMSS (~16s), continuous local EFS sync (raw UFS untouched), live SMS (`mmcli`) **and live 5G NR SA cellular internet** (`bitra-wwan` over `rmnet_data0@mhi_hwip0`, Dual-SIM DSDS supported) |
@@ -70,12 +74,18 @@ sudo bitra-wwan status
 sudo bitra-wwan up              # Uses /etc/default/bitra-wwan (default metric 700 = Wi-Fi failover)
 sudo bitra-wwan down
 
+# Optional Phosh mobile touch desktop (headless server with OLED off by default)
+sudo bitra-desktop status
+sudo bitra-desktop start        # Wake OLED & launch Phosh (scale = 2)
+sudo bitra-desktop stop         # Stop Phosh & true-DPMS power-off OLED
+# Note: set a local password (`sudo passwd ubuntu`) to unlock Phosh's lockscreen; SSH remains strictly key-only.
+
 # Reboot straight into Fastboot without touching physical buttons
 sudo reboot bootloader
 ```
 
 ## Repository Layout
-- `patches/` — Clean `git format-patch` series against upstream Linux `7.4.0-rc3` (`65e4fd942`): `sm8250-realme-bitra.dts` and `drivers/power/supply/mp2650_charger.c`.
+- `patches/` — Clean `git format-patch` series (`0001`–`0006`) against upstream Linux `7.4.0-rc3` (`65e4fd942`): `sm8250-realme-bitra.dts`, `mp2650_charger.c`, `panel-samsung-ams662zs01.c`, `synaptics_tcm_i2c.c`, `ubwc_config.c`, and SDX55M MHI support.
 - `kernel-cfg/` — Kernel config fragments (`00-base-sm8250-ram.config`, `10-bitra-server.config`).
 - `tools/` — Reproducible build, `.deb` packaging (`linux-image-*.deb`, `bitra-device-support_*.deb`), rootfs assembly, offline DTBO sink injection, and `boot_v2` + AVB hash footer scripts.
 - `docs/` — Build/flash guide, bring-up pitfalls, status ledger, kernel ABI ledger, and tech-debt tracker.

@@ -1346,8 +1346,114 @@ RestartSec=5
 WantedBy=multi-user.target
 WWANUNIT
 
+# 13. Optional Phosh Mobile Touch Desktop & Headless OLED True-DPMS-Off (anti-burn-in)
+mkdir -p "$STAGE/etc/phosh"
+cat > "$STAGE/etc/phosh/phoc.ini" << "PHOCINI"
+[output:DSI-1]
+scale = 2
+PHOCINI
+
+mkdir -p "$STAGE/etc/xdg/xdg-desktop-portal"
+cat > "$STAGE/etc/xdg/xdg-desktop-portal/phosh-portals.conf" << "PORTALCONF"
+[preferred]
+default=gtk
+org.freedesktop.impl.portal.Access=phosh;gtk;
+org.freedesktop.impl.portal.Background=none;
+org.freedesktop.impl.portal.Clipboard=none;
+org.freedesktop.impl.portal.InputCapture=none;
+org.freedesktop.impl.portal.RemoteDesktop=none;
+org.freedesktop.impl.portal.ScreenCast=none;
+org.freedesktop.impl.portal.Screenshot=none;
+org.freedesktop.impl.portal.Secret=none;
+org.freedesktop.impl.portal.Wallpaper=none;
+PORTALCONF
+
+cat > "$STAGE/usr/sbin/bitra-desktop" << "DESKSH"
+#!/bin/bash
+set -euo pipefail
+
+BL_DIR="/sys/class/backlight/ae94000.dsi.0"
+FB_BLANK="/sys/class/graphics/fb0/blank"
+
+oled_off() {
+  [ -w "$BL_DIR/brightness" ] && echo 0 > "$BL_DIR/brightness" 2>/dev/null || true
+  [ -w "$FB_BLANK" ] && echo 1 > "$FB_BLANK" 2>/dev/null || true
+}
+
+oled_on() {
+  local level="${1:-800}"
+  [ -w "$FB_BLANK" ] && echo 0 > "$FB_BLANK" 2>/dev/null || true
+  [ -w "$BL_DIR/brightness" ] && echo "$level" > "$BL_DIR/brightness" 2>/dev/null || true
+}
+
+case "${1:-status}" in
+  start)
+    if ! systemctl list-unit-files phosh.service >/dev/null 2>&1; then
+      echo "Phosh is not installed. Install with: sudo apt-get install phosh phoc phosh-osk-stub"
+      exit 1
+    fi
+    oled_on 800
+    systemctl start phosh.service
+    echo "[bitra-desktop] Phosh started on DSI-1."
+    ;;
+  stop)
+    systemctl stop phosh.service 2>/dev/null || true
+    sleep 1
+    oled_off
+    echo "[bitra-desktop] Phosh stopped; OLED powered off (DPMS blank)."
+    ;;
+  blank)
+    oled_off
+    echo "[bitra-desktop] OLED powered off (DPMS blank)."
+    ;;
+  unblank)
+    oled_on "${2:-800}"
+    echo "[bitra-desktop] OLED powered on (brightness=${2:-800})."
+    ;;
+  enable)
+    systemctl enable phosh.service
+    systemctl set-default graphical.target
+    echo "[bitra-desktop] Enabled Phosh on boot (graphical.target)."
+    ;;
+  disable)
+    systemctl disable phosh.service 2>/dev/null || true
+    systemctl set-default multi-user.target
+    echo "[bitra-desktop] Disabled Phosh on boot (headless multi-user.target default)."
+    ;;
+  status)
+    echo "Default target : $(systemctl get-default)"
+    echo "Phosh service  : $(systemctl is-active phosh.service 2>/dev/null || true) ($(systemctl is-enabled phosh.service 2>/dev/null || true))"
+    [ -r "$BL_DIR/brightness" ] && echo "OLED backlight : $(cat "$BL_DIR/brightness") / $(cat "$BL_DIR/max_brightness")" || echo "OLED backlight : unavailable"
+    [ -r "$FB_BLANK" ] && echo "FB0 blank      : $(cat "$FB_BLANK")" || true
+    [ -e /dev/dri/card0 ] && echo "DRM / GPU      : /dev/dri/card0 + $(ls /dev/dri/renderD* 2>/dev/null | tr '\n' ' ')" || echo "DRM / GPU      : unavailable"
+    grep -l "Synaptics S3908" /sys/class/input/event*/device/name 2>/dev/null | sed 's|/device/name||' | xargs -r -I{} echo "Touchscreen    : {} (Synaptics S3908)"
+    ;;
+  *)
+    echo "Usage: bitra-desktop {start|stop|blank|unblank [brightness]|enable|disable|status}"
+    exit 2
+    ;;
+esac
+DESKSH
+chmod 755 "$STAGE/usr/sbin/bitra-desktop"
+
+cat > "$STAGE/etc/systemd/system/bitra-oled-blank.service" << "OLEDBLANK"
+[Unit]
+Description=RMX3370 Headless OLED True-DPMS Power-Off (Anti-Burn-In)
+After=systemd-udev-settle.service local-fs.target
+ConditionPathExists=!/run/bitra-keep-oled-on
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'for i in $(seq 1 20); do [ -e /sys/class/graphics/fb0/blank ] && break; sleep 0.5; done; if ! systemctl is-active --quiet phosh.service; then /usr/sbin/bitra-desktop blank; fi'
+
+[Install]
+WantedBy=multi-user.target
+OLEDBLANK
+
 cat > "$STAGE/DEBIAN/conffiles" << CONF
 /etc/default/bitra-wwan
+/etc/phosh/phoc.ini
+/etc/xdg/xdg-desktop-portal/phosh-portals.conf
 CONF
 
 cat > "$STAGE/DEBIAN/control" << CTRL
@@ -1377,6 +1483,7 @@ if [ -d /etc/systemd/system/multi-user.target.wants ]; then
   ln -sf /etc/systemd/system/bitra-sdx55-sahara.service /etc/systemd/system/multi-user.target.wants/bitra-sdx55-sahara.service
   ln -sf /etc/systemd/system/bitra-sdx55-efs-sync.service /etc/systemd/system/multi-user.target.wants/bitra-sdx55-efs-sync.service
   ln -sf /etc/systemd/system/bitra-sdx55-sim-init.service /etc/systemd/system/multi-user.target.wants/bitra-sdx55-sim-init.service
+  ln -sf /etc/systemd/system/bitra-oled-blank.service /etc/systemd/system/multi-user.target.wants/bitra-oled-blank.service
 fi
 exit 0
 POST

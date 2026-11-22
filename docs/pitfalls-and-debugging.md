@@ -183,16 +183,68 @@ wifi.powersave = 2`) in `bitra-device-support` (latency drops to ~6 ms consisten
   3. On `qrtr://3`, each process gets its own QRTR client port, so `qmicli --client-cid=...` cannot span multiple CLI calls (and `qmi-proxy` does not proxy `qrtr://`). Our zero-dependency Python client `/usr/sbin/bitra-wwan` uses a single persistent `AF_QIPCRTR` (`42`) socket to execute `WDA Set Data Format` (`raw-ip + QMAP` on PCIe EP `3/4`), `WDS Bind Mux Data Port (0x00A2, mux_id=1)`, `WDS Bind Subscription (0x00AF, slot 1/2)`, `WDS Set IP Family (0x004D)`, `WDS Start Network (0x0020)`, and `WDS Get Current Settings (0x002D)` onto `rmnet_data0@mhi_hwip0`.
   4. When swapping a new physical SIM card into SDX55M, MPSS leaves its USIM app in `detected` state until `UIM Change Provisioning Session` activates `primary-gw-provisioning` / `secondary-gw-provisioning`; `bitra-wwan` automates this check before dialing.
 
-### 15. USB CDC-ECM (`usb0`) Drops Right After Boot on `pm8150b_typec` (`tcpm`) Init
+---
+
+## 24. USB CDC-ECM (`usb0`) Drops Right After Boot on `pm8150b_typec` (`tcpm`) Init
 - **Symptom**: `bitra-usb-gadget.service` binds `a600000.usb` at `t~10.6s`, host gets DHCP, then `usb0` drops to `NO-CARRIER` (`udc/state = not attached`) and even rebinding `g1/UDC` alone does not restore it.
 - **Root cause**: `pm8150b_typec` (`tcpm`) probes ~100 ms later (`t~10.76s`), performs an initial ~1.2 s `PORT_RESET`, and invokes `usb-role 0 (NONE)`, detaching `dwc3` while `g1/UDC` still appears bound.
 - **Fix**: `bitra-usb-gadget.sh` (`bitra-device-support >= 0.9`) runs a 6 s post-boot check: if `udc/state != configured` and `usb_role != host` (preserving OTG host mode), it cycles `/sys/class/usb_role/a600000.usb-role-switch/role` (`none -> device`) and rebinds `g1/UDC`.
 
-### 16. QCA6390 Wi-Fi 6 Power Save Override Order (`99-*` vs `default-*`)
+---
+
+## 25. QCA6390 Wi-Fi 6 Power Save Override Order (`99-*` vs `default-*`)
 - **Symptom**: `/etc/NetworkManager/conf.d/99-bitra-wifi-powersave-off.conf` did not take effect (`iw dev wlp1s0 get power_save` stayed `on`, causing 300–1200 ms latency spikes).
 - **Root cause**: Ubuntu ships `/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf` (`wifi.powersave = 3`), and lexicographically `"d"` (ASCII 100) sorts *after* `"9"` (ASCII 57), overriding `99-*`.
 - **Fix**: Renamed to `zz-bitra-wifi-powersave-off.conf` (`"z" > "d"`) in `bitra-device-support >= 0.9`, with `postinst` cleaning up the old `99-*` file. Confirmed `Power save: off` (~4–8 ms ping).
 
-### 17. Carrier Idle PS Detach / `ModemManager` AT-Init Interrupting 5G NR SA
+---
+
+## 26. Carrier Idle PS Detach / `ModemManager` AT-Init Interrupting 5G NR SA
 - **Symptom**: `ModemManager` initializing `/dev/wwan0at0` on boot (or carrier 3-minute idle timeout `network forced PS detach`) can leave SDX55M NAS in `limited` / `power-save` while a bound WDS socket still looks active.
 - **Fix**: `bitra-wwan` (`bitra-device-support >= 0.9`) starts `After=ModemManager.service`, runs `ensure_nas_registered()` (cycling `DMS low-power -> online` if NAS is stuck in `limited`/`power-save`), and monitors both WDS (`0x0022`) and NAS Serving System (`0x0024`) every 15 s to auto-reconnect on carrier detach.
+
+---
+
+## 27. Stock `dtbo.img` Root `compatible` Override Breaks `msm-mdss` UBWC & Missing `&gmu` Hard-Resets on Probe
+- **Symptoms**:
+  1. `msm-mdss ae00000.display-subsystem` failed probe with `-22` (`Couldn't find UBWC config data for this platform!`).
+  2. After fixing UBWC, loading `msm.ko` with `&gpu { status = "okay"; }` but without `&gmu { status = "okay"; }` triggered an instant SoC reset.
+- **Root Cause**:
+  1. Stock ABL `dtbo.img` rewrites the root `/` `compatible` property at boot to `"qcom,kona-mtp", "qcom,kona", "qcom,mtp"`, stripping `"qcom,sm8250"` that upstream `drivers/soc/qcom/ubwc_config.c` matches on.
+  2. Adreno 650 on SM8250 requires `&gmu` enabled alongside `&gpu`.
+- **Fix**: Add `{ .compatible = "qcom,kona", .data = &ubwc_4_0_hbb16 }` in `drivers/soc/qcom/ubwc_config.c` and enable both `&gmu` and `&gpu` in `sm8250-realme-bitra.dts`.
+
+---
+
+## 28. Adreno 650 Split Firmware Requirement (Stock `a650_zap.mbn` + Upstream `a650_sqe.fw` >= v95)
+- **Symptom**: Using stock Android RUI 3.0 `a650_sqe.fw` failed GPU init with `a650 SQE ucode is too old. Have version 93 need at least 95`; conversely, generic upstream `a650_zap.mbn` fails TrustZone signature validation on RMX3370.
+- **Fix**: Pair the device-signed stock **`vendor/firmware/a650_zap.elf`** (installed as `/lib/firmware/qcom/sm8250/realme/bitra/a650_zap.mbn`) with upstream `linux-firmware` **`a650_sqe.fw` (v112)** and **`a650_gmu.bin`**.
+
+---
+
+## 29. Synaptics `S3908` Native 8x Subpixel Coordinates (`8639x19199`) & I2C Probe Race
+- **Symptoms**:
+  1. First probe timed out (`CMD_IDENTIFY failed: -110`) because the threaded IRQ handler read the boot `REPORT_IDENTIFY` packet concurrently with `probe()`'s I2C transfer.
+  2. Setting `touchscreen-size-x = <1080>` / `touchscreen-size-y = <2400>` clipped touch input to the top-left 1/8th of the screen.
+- **Fix**: Serialize all I2C transfers in `drivers/input/touchscreen/synaptics_tcm_i2c.c` with `rw_lock` (and drain the initial boot identify after reset), and expose the controller's native `8639x19199` range directly so `libinput` scales cleanly to `1080x2400`.
+
+---
+
+## 30. Volume Down Key Hardware Wiring (`pm8150` GPIO 7, Not PMIC PON `resin`)
+- **Symptom**: Power (`pm8941_pwrkey`) and Volume Up (`pm8150` GPIO 6) worked, while Volume Down reported zero events when wired to `&pon_resin`.
+- **Root Cause**: On RMX3370 (confirmed in stock `live.dts`), both volume buttons are discrete PMIC GPIOs on `pm8150`: Volume Up = GPIO 6 (`spmi-gpio 5`), Volume Down = GPIO 7 (`spmi-gpio 6`), both `GPIO_ACTIVE_LOW`.
+- **Fix**: Move `key-vol-down` (`KEY_VOLUMEDOWN`) into `gpio-keys` on `&pm8150_gpios 7 GPIO_ACTIVE_LOW` with `vol_down_pin` pinctrl (`gpio7`, pull-up).
+
+---
+
+## 31. GTK4 Apps (`kgx`, `nautilus`, `gnome-control-center`) Hang 25–90s on Launch in Phosh (`xdg-desktop-portal-gnome`)
+- **Symptom**: Launching GTK4 apps in Phosh caused a 25+ second black screen (`Console`, `Settings`) or appeared to crash and then open 25s later (`Files` hitting Phosh's 5s startup timeout).
+- **Root Cause**: Ubuntu's `nautilus` / `gnome-control-center` pull in `xdg-desktop-portal-gnome`, whose user unit declares `Requisite=graphical-session.target` (which Phosh's non-systemd `gnome-session` does not start). Because `phosh-portals.conf` leaves several interfaces (`Background`, `Wallpaper`, `ScreenCast`, `Screenshot`) unmatched, `xdg-desktop-portal` fell back to `gnome.portal`, failing immediately on systemd dependency while hanging 25s per interface on D-Bus (90s+ total).
+- **Fix**: Remove `xdg-desktop-portal-gnome` and ship `/etc/xdg/xdg-desktop-portal/phosh-portals.conf` in `bitra-device-support 1.0` explicitly setting `default=gtk` and `none;` for unsupported GNOME Shell portal interfaces. `xdg-desktop-portal.service` startup drops from `90s (timeout)` to `0.08s`, and all GTK4 apps open instantaneously.
+
+---
+
+## 32. Cold-Boot Race: Built-In `arm-smmu 3da0000.iommu` vs Module `gpucc_sm8250` (`deferred probe timeout`)
+- **Symptom**: On roughly half of cold boots, `arm-smmu 3da0000.iommu` (`&adreno_smmu`) timed out at `t ~ 10.74s` with `deferred probe timeout, ignoring dependency` (`probe failed with error -110`), causing `adreno 3d00000.gpu` to fail with `-19` (`-ENODEV`) and leaving `/dev/dri/card0` unavailable.
+- **Root Cause**: `CONFIG_ARM_SMMU=y` is built-in, and `&adreno_smmu` (`3da0000.iommu`) depends on `&gpucc` (`GPU_CC_AHB_CLK`, `GPU_CX_GDSC`), which was compiled as a loadable module (`CONFIG_SM_GPUCC_8250=m`). When `systemd-udevd` loaded `gpucc_sm8250.ko` right around Linux's 10-second default `deferred_probe_timeout`, it intermittently lost the race.
+- **Fix**: Set `CONFIG_SM_GPUCC_8250=y` and `CONFIG_SM_DISPCC_8250=y` in `kernel-cfg/10-bitra-server.config` so both GPU and display clock controllers are built-in alongside `gcc-sm8250` and `arm-smmu`. `3da0000.iommu` now probes deterministically during early boot (`t < 1s`) with zero deferred-probe timeouts.
