@@ -89,14 +89,14 @@ make -j$(nproc) -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" \
 
 ### 4.2 Build `.deb` Packages
 ```bash
-# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra9_1_arm64.deb
+# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra10_1_arm64.deb
 OUT="$PWD/out/server-build" bash tools/pkg_kernel_deb.sh
 
-# Device integration package -> out/debs/bitra-device-support_0.6_arm64.deb
+# Device integration package -> out/debs/bitra-device-support_0.9_arm64.deb
 # Includes: USB CDC-ECM service, key-only SSH config, NetworkManager usb0 unmanaged rule,
 #           compact initramfs-tools config (MODULES=list), Wi-Fi MAC udev rule,
 #           24/7 anti-swelling charge-limit systemd timer, 24/7 no-suspend policy
-bash tools/pkg_device_support_deb.sh 0.6
+bash tools/pkg_device_support_deb.sh 0.9
 ```
 
 ---
@@ -108,12 +108,12 @@ bash tools/pkg_device_support_deb.sh 0.6
 # installs server packages + our two .debs via qemu-aarch64-static chroot,
 # generates compact initrd (< 8 MiB), and outputs:
 #   out/ubuntu-24.04.5-bitra-server-arm64.tar.gz
-#   out/initrd.img-7.4.0-rc3-bitra9
+#   out/initrd.img-7.4.0-rc3-bitra10
 bash tools/build_ubuntu_rootfs.sh
 
 # Injects DTBO sink symbols, verifies offline fdtoverlay apply, checks initrd <= 14 MiB,
 # builds Android boot_v2 image, and appends 96 MiB AVB hash footer:
-#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra9.img
+#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra10.img
 OUT="$PWD/out/server-build" bash tools/make_ubuntu_boot.sh
 ```
 
@@ -170,12 +170,12 @@ chroot /mnt /usr/bin/python3 -c 'import ctypes; ctypes.CDLL("libc.so.6").syscall
 
 ### 7.1 Always RAM-Test Before Flashing
 ```bash
-fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra9.img
+fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra10.img
 ```
 Wait ~20–25 seconds, then SSH in:
 ```bash
 ssh ubuntu@192.168.2.15
-uname -a                    # 7.4.0-rc3-bitra9 aarch64
+uname -a                    # 7.4.0-rc3-bitra10 aarch64
 systemctl is-system-running # running (0 failed units)
 df -h /                     # /dev/sda11 ~222G
 ```
@@ -209,6 +209,13 @@ echo 'SIM_SLOT="2"' | sudo tee /etc/default/bitra-sdx55
 # Verify after reboot:
 mmcli -m 0
 mmcli -m 0 --messaging-list-sms
+
+# Optional: bring up 5G/4G cellular data over rmnet_data0 (QMI over QRTR)
+# Edit /etc/default/bitra-wwan to set WWAN_SLOT (1 or 2) and WWAN_APN (e.g. cmnet / 3gnet / ctnet)
+sudo bitra-wwan status
+sudo bitra-wwan up
+# To auto-connect 5G/4G on every boot (metric 700 = Wi-Fi failover):
+sudo systemctl enable bitra-wwan.service
 ```
 > **EFS Safety**: Runtime EFS syncs from SDX55M (`bitra-sdx55-efs-sync.service` over `/dev/wwan0efs0`) are written **only** to `/var/lib/bitra/sdx55m-efs-rw/`. The phone's factory UFS EFS partitions (`/dev/disk/by-partlabel/mdm1m9kefs*`) are **never** written to.
 
@@ -218,7 +225,7 @@ mmcli -m 0 --messaging-list-sms
 sudo reboot bootloader
 
 # On your host:
-fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra9.img
+fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra10.img
 fastboot -s <SERIAL> reboot
 ```
 After ~25 seconds, cold-boot SSH (`ssh ubuntu@192.168.2.15`) is live; after ~32 seconds, `regulator_late_cleanup` powers off the OLED rails (`vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15` -> `disabled`).

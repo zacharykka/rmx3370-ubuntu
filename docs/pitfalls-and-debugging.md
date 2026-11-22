@@ -173,3 +173,26 @@ dns=default`) in `bitra-device-support`.
 - **Root Cause**: Ubuntu ships `/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf` (`wifi.powersave = 3`), keeping `ath11k_pci` (`QCA6390`) in 802.11 power-save sleep between DTIM beacons.
 - **Fix**: Ship `/etc/NetworkManager/conf.d/99-bitra-wifi-powersave-off.conf` (`[connection]
 wifi.powersave = 2`) in `bitra-device-support` (latency drops to ~6 ms consistently).
+
+---
+
+## 23. SDX55M 5G Cellular Data (`qrtr://3` QMI + `rmnet_data0` + Dual-SIM DSDS)
+- **Root Findings**:
+  1. On RMX3370 SDX55M, cellular QMI services (`WDS=1`, `DMS=2`, `NAS=3`, `WMS=5`, `UIM=11`, `WDA=26`) live on **`QRTR Node 3`** (`IPCR` ch 20/21), **not** `/dev/wwan0qmi0` (`QMI0` ch 14/15).
+  2. During initial boot, MPSS publishes its 35+ QMI services *after* `tqftpserv-sdx55` serves MCFG; rebinding **only** `mhi0_IPCR` (`qcom_mhi_qrtr` driver unbind/bind — **never** `rmmod qrtr_mhi`, which Wi-Fi `mhi1_IPCR` also shares!) replays all 35+ QMI services cleanly. We also resized `IPCR` from 8 -> 64 descriptors on dedicated `SW_DATA` ER2 (matching stock DTS) in `bitra10`.
+  3. On `qrtr://3`, each process gets its own QRTR client port, so `qmicli --client-cid=...` cannot span multiple CLI calls (and `qmi-proxy` does not proxy `qrtr://`). Our zero-dependency Python client `/usr/sbin/bitra-wwan` uses a single persistent `AF_QIPCRTR` (`42`) socket to execute `WDA Set Data Format` (`raw-ip + QMAP` on PCIe EP `3/4`), `WDS Bind Mux Data Port (0x00A2, mux_id=1)`, `WDS Bind Subscription (0x00AF, slot 1/2)`, `WDS Set IP Family (0x004D)`, `WDS Start Network (0x0020)`, and `WDS Get Current Settings (0x002D)` onto `rmnet_data0@mhi_hwip0`.
+  4. When swapping a new physical SIM card into SDX55M, MPSS leaves its USIM app in `detected` state until `UIM Change Provisioning Session` activates `primary-gw-provisioning` / `secondary-gw-provisioning`; `bitra-wwan` automates this check before dialing.
+
+### 15. USB CDC-ECM (`usb0`) Drops Right After Boot on `pm8150b_typec` (`tcpm`) Init
+- **Symptom**: `bitra-usb-gadget.service` binds `a600000.usb` at `t~10.6s`, host gets DHCP, then `usb0` drops to `NO-CARRIER` (`udc/state = not attached`) and even rebinding `g1/UDC` alone does not restore it.
+- **Root cause**: `pm8150b_typec` (`tcpm`) probes ~100 ms later (`t~10.76s`), performs an initial ~1.2 s `PORT_RESET`, and invokes `usb-role 0 (NONE)`, detaching `dwc3` while `g1/UDC` still appears bound.
+- **Fix**: `bitra-usb-gadget.sh` (`bitra-device-support >= 0.9`) runs a 6 s post-boot check: if `udc/state != configured` and `usb_role != host` (preserving OTG host mode), it cycles `/sys/class/usb_role/a600000.usb-role-switch/role` (`none -> device`) and rebinds `g1/UDC`.
+
+### 16. QCA6390 Wi-Fi 6 Power Save Override Order (`99-*` vs `default-*`)
+- **Symptom**: `/etc/NetworkManager/conf.d/99-bitra-wifi-powersave-off.conf` did not take effect (`iw dev wlp1s0 get power_save` stayed `on`, causing 300–1200 ms latency spikes).
+- **Root cause**: Ubuntu ships `/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf` (`wifi.powersave = 3`), and lexicographically `"d"` (ASCII 100) sorts *after* `"9"` (ASCII 57), overriding `99-*`.
+- **Fix**: Renamed to `zz-bitra-wifi-powersave-off.conf` (`"z" > "d"`) in `bitra-device-support >= 0.9`, with `postinst` cleaning up the old `99-*` file. Confirmed `Power save: off` (~4–8 ms ping).
+
+### 17. Carrier Idle PS Detach / `ModemManager` AT-Init Interrupting 5G NR SA
+- **Symptom**: `ModemManager` initializing `/dev/wwan0at0` on boot (or carrier 3-minute idle timeout `network forced PS detach`) can leave SDX55M NAS in `limited` / `power-save` while a bound WDS socket still looks active.
+- **Fix**: `bitra-wwan` (`bitra-device-support >= 0.9`) starts `After=ModemManager.service`, runs `ensure_nas_registered()` (cycling `DMS low-power -> online` if NAS is stuck in `limited`/`power-save`), and monitors both WDS (`0x0022`) and NAS Serving System (`0x0024`) every 15 s to auto-reconnect on carrier detach.

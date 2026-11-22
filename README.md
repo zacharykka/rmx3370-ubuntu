@@ -6,7 +6,7 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 - **[Build, Package & Flash Guide](docs/build-and-flash.md)** — Complete step-by-step instructions from upstream Linux source to cold-booting Ubuntu 24.04.5 LTS Server, Wi-Fi 6 setup, anti-swelling charge control, and recovery.
 - **[Bring-Up Pitfalls & Debugging Notes](docs/pitfalls-and-debugging.md)** — Every real RMX3370 hardware/bootloader/initramfs pitfall hit during development (with root causes, `pstore` evidence, and exact fixes).
 - **[Hardware & Milestone Status](docs/status.md)** — Live bring-up checklist and verified hardware capabilities.
-- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra9`).
+- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra10`).
 - **[Technical Debt Tracker](docs/tech-debt.md)** — Known temporary workarounds and exit criteria.
 
 ## Verified Working Hardware (`7.4.0-rc3-bitra9`, Flashed & Cold-Boot Verified)
@@ -23,7 +23,7 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | OLED Screen-Off | `vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15` | **Working** | RPMh `regulator_late_cleanup` powers off OLED physically at boot + 31s (~1.5 W idle, 0 burn-in) |
 | Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, Docker (`overlayfs`, `cgroup2fs`, `iptables-nft` NAT/bridge), AppArmor, `wireguard`, `nf_tables` |
 | USB Host / OTG | `pm8150b_typec` + `usb_1_dwc3` OTG + MP2650 5V boost | **Working** | Dual-role Type-C + 5V/1.25A OTG boost; verified with external USB hard drive |
-| Built-in 5G Modem + SMS | `SDX55M` (PCIe2 MHI + Sahara + EFS Sync + `tqftpserv-sdx55` + `ModemManager`) | **Working** | Cold-boots AMSS automatically (~16s), continuous local EFS sync (raw UFS untouched), live cellular registration & `mmcli` SMS ready; device-local firmware |
+| Built-in 5G Modem + SMS + 5G Data | `SDX55M` (PCIe2 MHI + Sahara + EFS Sync + `tqftpserv-sdx55` + QMI-over-QRTR + `rmnet` + `ModemManager`) | **Working** | Cold-boots AMSS (~16s), continuous local EFS sync (raw UFS untouched), live SMS (`mmcli`) **and live 5G NR SA cellular internet** (`bitra-wwan` over `rmnet_data0@mhi_hwip0`, Dual-SIM DSDS supported) |
 
 ## ⚠️ Required Proprietary Files Extracted From Official Stock Images / Device Partitions
 
@@ -64,6 +64,11 @@ echo 'SIM_SLOT="2"' | sudo tee /etc/default/bitra-sdx55
 # Check live cellular registration and SMS via ModemManager
 mmcli -m 0
 mmcli -m 0 --messaging-list-sms
+
+# Built-in 5G/4G cellular internet (QMI over QRTR + rmnet_data0)
+sudo bitra-wwan status
+sudo bitra-wwan up              # Uses /etc/default/bitra-wwan (default metric 700 = Wi-Fi failover)
+sudo bitra-wwan down
 
 # Reboot straight into Fastboot without touching physical buttons
 sudo reboot bootloader

@@ -173,6 +173,23 @@ if command -v dnsmasq >/dev/null 2>&1; then
     --dhcp-leasefile=/run/bitra-usb-dhcp.leases \
     --pid-file=/run/bitra-usb-dnsmasq.pid
 fi
+
+# pm8150b_typec (tcpm) does an initial ~1.2s PORT_RESET shortly after boot that can drop
+# dwc3 out of device link while g1/UDC still looks bound. Recover once after tcpm settles
+# (only when not in OTG host mode).
+rebind_if_detached() {
+  ROLE_NODE="/sys/class/usb_role/${UDC}-role-switch/role"
+  STATE=$(cat "/sys/class/udc/$UDC/state" 2>/dev/null || true)
+  ROLE=$(cat "$ROLE_NODE" 2>/dev/null || true)
+  if [ "$STATE" != "configured" ] && [ "$ROLE" != "host" ]; then
+    [ -w "$ROLE_NODE" ] && echo none > "$ROLE_NODE" 2>/dev/null || true
+    echo "" > "$G/UDC" 2>/dev/null || true
+    sleep 1
+    [ -w "$ROLE_NODE" ] && echo device > "$ROLE_NODE" 2>/dev/null || true
+    echo "$UDC" > "$G/UDC" 2>/dev/null || true
+  fi
+}
+( sleep 6; rebind_if_detached ) >/dev/null 2>&1 &
 USB
 chmod 755 "$STAGE/usr/sbin/bitra-usb-gadget.sh"
 
@@ -230,7 +247,7 @@ dns=default
 NMDNS
 
 # 7d. Disable Wi-Fi Power Save for low-latency 24/7 headless server (avoids 300-1200ms QCA6390 ping spikes)
-cat > "$STAGE/etc/NetworkManager/conf.d/99-bitra-wifi-powersave-off.conf" << "NMPS"
+cat > "$STAGE/etc/NetworkManager/conf.d/zz-bitra-wifi-powersave-off.conf" << "NMPS"
 [connection]
 wifi.powersave = 2
 NMPS
@@ -345,6 +362,7 @@ cat > "$STAGE/etc/udev/rules.d/99-bitra-sdx55-sahara.rules" << "SDXUDEV"
 SUBSYSTEM=="wwan", KERNEL=="wwan*sahara*", ENV{ID_MM_PORT_IGNORE}="1"
 SUBSYSTEM=="wwan", KERNEL=="wwan*efs*", ENV{ID_MM_PORT_IGNORE}="1"
 SUBSYSTEM=="wwan", KERNEL=="wwan*qmi*", ENV{ID_MM_PORT_IGNORE}="1"
+SUBSYSTEM=="net", KERNEL=="mhi_hwip*|mhi_swip*", ENV{ID_MM_PORT_IGNORE}="1"
 SDXUDEV
 
 cat > "$STAGE/etc/default/bitra-sdx55" << "SDXDEF"
@@ -861,6 +879,477 @@ ExecStart=/usr/bin/python3 /usr/sbin/bitra-sdx55-sim-init.py
 WantedBy=multi-user.target
 SDXUNIT5
 
+
+# 12. Native QMI-over-QRTR 5G/4G Cellular Data Tool (bitra-wwan + rmnet_data0@mhi_hwip0)
+cat > "$STAGE/etc/default/bitra-wwan" << "WWANDEF"
+# Set WWAN_AUTOSTART=1 to bring up 5G/4G cellular data automatically on boot
+WWAN_AUTOSTART=0
+# SIM subscription slot for cellular data: 1 = Primary (Slot 1), 2 = Secondary (Slot 2)
+WWAN_SLOT=1
+# Carrier APN (leave empty to use carrier default, or set e.g. cmnet / 3gnet / ctnet)
+WWAN_APN=""
+# Route metric for rmnet_data0 (Wi-Fi is 600; 700 = automatic failover, 100 = prefer 5G/4G)
+WWAN_METRIC=700
+WWANDEF
+
+cat > "$STAGE/usr/sbin/bitra-wwan" << "WWANPY"
+#!/usr/bin/env python3
+"""Native QMI-over-QRTR 5G/4G cellular data manager for RMX3370 SDX55M (rmnet_data0@mhi_hwip0)."""
+import argparse, ctypes, os, select, signal, socket, struct, subprocess, sys, time
+
+AF_QIPCRTR = 42
+SOCK_DGRAM = 2
+SVC_WDS = 1
+SVC_NAS = 3
+SVC_WDA = 26
+NODE_MPSS = 3
+PCIE_EP_TYPE = 3
+PCIE_EP_IFACE = 4
+MUX_ID = 1
+PHYS_DEV = "mhi_hwip0"
+RMNET_DEV = "rmnet_data0"
+CONF_PATH = "/etc/default/bitra-wwan"
+
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+
+def load_conf():
+    cfg = {"WWAN_AUTOSTART": "0", "WWAN_SLOT": "1", "WWAN_APN": "", "WWAN_METRIC": "700"}
+    if os.path.isfile(CONF_PATH):
+        for line in open(CONF_PATH):
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip().strip('"').strip("'")
+    return cfg
+
+def run(cmd, check=True):
+    return subprocess.run(cmd, check=check, text=True, capture_output=True)
+
+def ensure_mhi0_qrtr():
+    """Safely rebind ONLY mhi0_IPCR (never touching Wi-Fi mhi1_IPCR) if MPSS QMI services are missing."""
+    try:
+        out = subprocess.check_output(["qrtr-lookup"], text=True, stderr=subprocess.DEVNULL)
+        if any(line.split()[:1] == ["1"] and len(line.split()) >= 5 and line.split()[3] == str(NODE_MPSS) for line in out.splitlines()):
+            return
+    except Exception:
+        pass
+    unbind = "/sys/bus/mhi/drivers/qcom_mhi_qrtr/unbind"
+    bind = "/sys/bus/mhi/drivers/qcom_mhi_qrtr/bind"
+    if os.path.exists(unbind) and os.path.exists("/sys/bus/mhi/devices/mhi0_IPCR"):
+        try:
+            with open(unbind, "w") as f: f.write("mhi0_IPCR")
+            time.sleep(0.25)
+            with open(bind, "w") as f: f.write("mhi0_IPCR")
+            time.sleep(1.0)
+        except OSError:
+            pass
+
+def ensure_uim_provisioned():
+    """Ensure DMS is online and newly swapped SIM cards have Primary/Secondary GW sessions activated."""
+    run(["qmicli", "-d", f"qrtr://{NODE_MPSS}", "--dms-set-operating-mode=online"], check=False)
+    r = run(["qmicli", "-d", f"qrtr://{NODE_MPSS}", "--uim-get-card-status"], check=False)
+    if r.returncode != 0:
+        return
+    txt = r.stdout
+    for slot_num, sess_label, sess_type in [
+        (1, "Primary GW:", "primary-gw-provisioning"),
+        (2, "Secondary GW:", "secondary-gw-provisioning"),
+    ]:
+        if f"{sess_label}   session doesn't exist" not in txt and f"{sess_label} session doesn't exist" not in txt:
+            continue
+        # Extract first USIM Application ID under Slot [slot_num]
+        marker = f"Slot [{slot_num}]:"
+        idx = txt.find(marker)
+        if idx == -1:
+            continue
+        next_idx = txt.find(f"Slot [{slot_num + 1}]:", idx)
+        block = txt[idx:next_idx] if next_idx != -1 else txt[idx:]
+        lines = block.splitlines()
+        for i, line in enumerate(lines):
+            if "Application ID:" in line and i + 1 < len(lines):
+                aid = lines[i + 1].strip()
+                if aid and ":" in aid:
+                    print(f"[bitra-wwan] Activating {sess_type} on Slot {slot_num} (AID {aid[:14]}...)", flush=True)
+                    run([
+                        "qmicli", "-d", f"qrtr://{NODE_MPSS}",
+                        f"--uim-change-provisioning-session=slot={slot_num},activate=yes,session-type={sess_type},aid={aid}"
+                    ], check=False)
+                    time.sleep(2.0)
+                break
+
+def lookup_qrtr_svc(target_svc, target_node=NODE_MPSS, timeout=15.0):
+    ensure_mhi0_qrtr()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            out = subprocess.check_output(["qrtr-lookup"], text=True, stderr=subprocess.DEVNULL)
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[0].isdigit():
+                    svc, ver, inst, node, port = map(int, parts[:5])
+                    if svc == target_svc and node == target_node:
+                        return (node, port)
+        except Exception:
+            pass
+        time.sleep(0.5)
+    raise RuntimeError(f"QRTR service {target_svc} on node {target_node} not found after {timeout}s")
+
+def qrtr_open():
+    fd = libc.socket(AF_QIPCRTR, SOCK_DGRAM, 0)
+    if fd < 0:
+        raise OSError(ctypes.get_errno(), "socket(AF_QIPCRTR)")
+    return fd
+
+def qrtr_sendto(fd, data, dst):
+    sa = struct.pack("<HHII", AF_QIPCRTR, 0, dst[0], dst[1])
+    n = libc.sendto(fd, ctypes.c_char_p(data), len(data), 0, ctypes.c_char_p(sa), len(sa))
+    if n < 0:
+        raise OSError(ctypes.get_errno(), "sendto(AF_QIPCRTR)")
+    return n
+
+def qrtr_recv(fd, timeout=10.0):
+    r, _, _ = select.select([fd], [], [], timeout)
+    if not r:
+        raise TimeoutError("QRTR QMI response timeout")
+    buf = ctypes.create_string_buffer(4096)
+    n = libc.recvfrom(fd, buf, 4096, 0, None, None)
+    if n < 0:
+        raise OSError(ctypes.get_errno(), "recvfrom(AF_QIPCRTR)")
+    return buf.raw[:n]
+
+def tlv(t, val):
+    return struct.pack("<BH", t, len(val)) + val
+
+def parse_tlvs(data):
+    res, i = {}, 0
+    while i + 3 <= len(data):
+        t, l = struct.unpack_from("<BH", data, i)
+        res[t] = data[i+3:i+3+l]
+        i += 3 + l
+    return res
+
+class QmiClient:
+    def __init__(self, dst):
+        self.dst = dst
+        self.fd = qrtr_open()
+        self.txn = 0
+
+    def txrx(self, msg_id, tlvs=b"", timeout=15.0):
+        self.txn = (self.txn % 0xFFFE) + 1
+        pkt = struct.pack("<BHHH", 0x00, self.txn, msg_id, len(tlvs)) + tlvs
+        qrtr_sendto(self.fd, pkt, self.dst)
+        deadline = time.monotonic() + timeout
+        while True:
+            rem = deadline - time.monotonic()
+            if rem <= 0:
+                raise TimeoutError(f"QMI msg 0x{msg_id:04x} timeout")
+            resp = qrtr_recv(self.fd, rem)
+            if len(resp) < 7:
+                continue
+            flags, rtxn, rmsg, rlen = struct.unpack_from("<BHHH", resp, 0)
+            if flags == 0x02 and rtxn == self.txn and rmsg == msg_id:
+                parsed = parse_tlvs(resp[7:7+rlen])
+                rc, err = struct.unpack_from("<HH", parsed[0x02], 0)
+                return rc, err, parsed
+
+    def close(self):
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+def qmi_ipv4(raw):
+    val = struct.unpack_from("<I", raw, 0)[0]
+    return socket.inet_ntoa(struct.pack("!I", val))
+
+def mask_to_prefix(mask_str):
+    packed = struct.unpack("!I", socket.inet_aton(mask_str))[0]
+    return bin(packed).count("1")
+
+def setup_rmnet():
+    run(["modprobe", "rmnet"], check=False)
+    run(["ip", "link", "set", PHYS_DEV, "up"])
+    chk = run(["ip", "link", "show", RMNET_DEV], check=False)
+    if chk.returncode != 0:
+        run(["ip", "link", "add", RMNET_DEV, "link", PHYS_DEV, "type", "rmnet", "mux_id", str(MUX_ID)])
+    run(["ip", "link", "set", RMNET_DEV, "up"])
+
+def ensure_nas_registered():
+    """If modem is stuck in power-save/limited (e.g. after ModemManager AT init), cycle DMS RF once."""
+    def is_ready():
+        r = run(["qmicli", "-d", f"qrtr://{NODE_MPSS}", "--nas-get-serving-system"], check=False)
+        out = r.stdout
+        return ("Registration state: 'registered'" in out and "PS: 'attached'" in out and "Status: 'limited'" not in out)
+    if is_ready():
+        return
+    # Give modem a few seconds on cold boot before cycling RF
+    for _ in range(4):
+        time.sleep(2.0)
+        if is_ready():
+            return
+    print("[bitra-wwan] NAS not cleanly registered (limited/power-save); cycling DMS RF low-power -> online...", flush=True)
+    run(["qmicli", "-d", f"qrtr://{NODE_MPSS}", "--dms-set-operating-mode=low-power"], check=False)
+    time.sleep(2.0)
+    run(["qmicli", "-d", f"qrtr://{NODE_MPSS}", "--dms-set-operating-mode=online"], check=False)
+    for _ in range(10):
+        time.sleep(1.5)
+        if is_ready():
+            print("[bitra-wwan] NAS registered and PS attached!", flush=True)
+            return
+
+def configure_wda():
+    wda = QmiClient(lookup_qrtr_svc(SVC_WDA))
+    try:
+        # WDA Set Data Format (0x0020): raw-ip(2), ul/dl=qmap(5), dl_max_dgram=16, dl_max_size=16384, pcie ep=4
+        tlvs = (
+            tlv(0x11, struct.pack("<I", 2)) +
+            tlv(0x12, struct.pack("<I", 5)) +
+            tlv(0x13, struct.pack("<I", 5)) +
+            tlv(0x15, struct.pack("<I", 16)) +
+            tlv(0x16, struct.pack("<I", 16384)) +
+            tlv(0x17, struct.pack("<II", PCIE_EP_TYPE, PCIE_EP_IFACE))
+        )
+        rc, err, _ = wda.txrx(0x0020, tlvs)
+        if rc != 0:
+            raise RuntimeError(f"WDA Set Data Format failed: rc={rc} err={err}")
+    finally:
+        wda.close()
+
+def cmd_daemon(slot, apn, metric):
+    print(f"[bitra-wwan] Starting 5G/4G QMI data session (slot={slot}, apn={apn or '<default>'}, metric={metric})", flush=True)
+    ensure_mhi0_qrtr()
+    ensure_uim_provisioned()
+    ensure_nas_registered()
+    configure_wda()
+    setup_rmnet()
+    wds = QmiClient(lookup_qrtr_svc(SVC_WDS))
+    handle = None
+    stop_flag = False
+
+    def on_sig(signum, frame):
+        nonlocal stop_flag
+        stop_flag = True
+
+    signal.signal(signal.SIGTERM, on_sig)
+    signal.signal(signal.SIGINT, on_sig)
+
+    try:
+        # 1. Bind Mux Data Port (0x00A2)
+        mux_tlvs = (
+            tlv(0x10, struct.pack("<II", PCIE_EP_TYPE, PCIE_EP_IFACE)) +
+            tlv(0x11, struct.pack("<B", MUX_ID)) +
+            tlv(0x13, struct.pack("<I", 1))
+        )
+        rc, err, _ = wds.txrx(0x00A2, mux_tlvs)
+        if rc != 0:
+            raise RuntimeError(f"WDS Bind Mux Data Port failed: rc={rc} err={err}")
+
+        # 2. Bind Subscription (0x00AF): 0 = Primary (Slot 1), 1 = Secondary (Slot 2)
+        sub_id = 0 if int(slot) == 1 else 1
+        rc, err, _ = wds.txrx(0x00AF, tlv(0x01, struct.pack("<I", sub_id)))
+        print(f"[bitra-wwan] WDS Bind Subscription (slot={slot}, sub={sub_id}): rc={rc} err={err}", flush=True)
+
+        # 3. Set IP Family (0x004D): IPv4 (4)
+        rc, err, _ = wds.txrx(0x004D, tlv(0x01, struct.pack("<B", 4)))
+        if rc != 0:
+            raise RuntimeError(f"WDS Set IP Family failed: rc={rc} err={err}")
+
+        # 4. Start Network Interface (0x0020) — retry cleanly while modem finishes 5G/4G attach on cold boot
+        start_tlvs = b""
+        if apn:
+            start_tlvs += tlv(0x14, apn.encode("ascii"))
+        for attempt in range(1, 21):
+            if stop_flag:
+                return
+            rc, err, parsed = wds.txrx(0x0020, start_tlvs, timeout=30.0)
+            if rc == 0:
+                break
+            reason = parsed.get(0x10, b"").hex()
+            vreason = parsed.get(0x11, b"").hex()
+            if err == 14 and attempt < 20:
+                if attempt == 10:
+                    print("[bitra-wwan] Modem still unattached; cycling RF low-power -> online...", flush=True)
+                    run(["qmicli", "-d", f"qrtr://{NODE_MPSS}", "--dms-set-operating-mode=low-power"], check=False)
+                    time.sleep(2.0)
+                    run(["qmicli", "-d", f"qrtr://{NODE_MPSS}", "--dms-set-operating-mode=online"], check=False)
+                elif attempt == 1 or attempt % 5 == 0:
+                    print(f"[bitra-wwan] Waiting for 5G/4G cellular attach (attempt {attempt}/20, call_end={reason})...", flush=True)
+                time.sleep(2.0)
+                continue
+            raise RuntimeError(f"WDS Start Network failed: rc={rc} err={err} call_end={reason} verbose={vreason}")
+        handle = struct.unpack_from("<I", parsed[0x01], 0)[0]
+        print(f"[bitra-wwan] Connected! packet_data_handle=0x{handle:08x}", flush=True)
+
+        # 5. Get Current Settings (0x002D)
+        req_mask = 0x0000EFF3
+        rc, err, cfg = wds.txrx(0x002D, tlv(0x10, struct.pack("<I", req_mask)))
+        if rc != 0:
+            raise RuntimeError(f"WDS Get Current Settings failed: rc={rc} err={err}")
+
+        ip = qmi_ipv4(cfg[0x1E])
+        gw = qmi_ipv4(cfg[0x20])
+        mask = qmi_ipv4(cfg[0x21])
+        prefix = mask_to_prefix(mask)
+        dns = []
+        if 0x15 in cfg: dns.append(qmi_ipv4(cfg[0x15]))
+        if 0x16 in cfg: dns.append(qmi_ipv4(cfg[0x16]))
+        mtu = struct.unpack_from("<I", cfg[0x29], 0)[0] if 0x29 in cfg else 1500
+        if mtu < 1280 or mtu > 1500:
+            mtu = 1500
+
+        print(f"[bitra-wwan] IP={ip}/{prefix} GW={gw} MTU={mtu} DNS={dns}", flush=True)
+        run(["ip", "addr", "flush", "dev", RMNET_DEV], check=False)
+        run(["ip", "link", "set", RMNET_DEV, "mtu", str(mtu)])
+        run(["ip", "addr", "add", f"{ip}/{prefix}", "dev", RMNET_DEV])
+        run(["ip", "route", "replace", "default", "via", gw, "dev", RMNET_DEV, "metric", str(metric)])
+
+        with open("/run/bitra-wwan.env", "w") as f:
+            f.write(f"WWAN_IP={ip}/{prefix}\nWWAN_GW={gw}\nWWAN_DNS={' '.join(dns)}\nWWAN_HANDLE=0x{handle:08x}\n")
+
+        # If /etc/resolv.conf has no nameserver (e.g. Wi-Fi offline), populate carrier DNS
+        try:
+            cur_resolv = open("/etc/resolv.conf").read() if os.path.exists("/etc/resolv.conf") else ""
+        except OSError:
+            cur_resolv = ""
+        if dns and "nameserver " not in cur_resolv:
+            with open("/etc/resolv.conf", "w") as f:
+                f.write("# Generated by bitra-wwan\n")
+                for d in dns:
+                    f.write(f"nameserver {d}\n")
+
+        # Keep WDS client socket alive & monitor both WDS + NAS serving state every 15s
+        nas = QmiClient(lookup_qrtr_svc(SVC_NAS))
+        nas_bad = 0
+        last_chk = time.monotonic()
+        while not stop_flag:
+            r, _, _ = select.select([wds.fd], [], [], 1.0)
+            if r:
+                try:
+                    ind = os.read(wds.fd, 4096)
+                    if len(ind) >= 7:
+                        ictrl, _, imid, ilen = struct.unpack_from("<BHHH", ind, 0)
+                        if ictrl == 0x04 and imid == 0x0022:
+                            itlv = parse_tlvs(ind[7:7+ilen])
+                            if 0x01 in itlv and len(itlv[0x01]) >= 1 and itlv[0x01][0] != 2:
+                                print(f"[bitra-wwan] Carrier indicated disconnect (status={itlv[0x01][0]}), reconnecting...", flush=True)
+                                raise RuntimeError("Carrier disconnected")
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+            now = time.monotonic()
+            if now - last_chk >= 15.0:
+                last_chk = now
+                try:
+                    rc_s, _, pst = wds.txrx(0x0022, b"", timeout=5.0)
+                    if rc_s == 0 and 0x01 in pst and len(pst[0x01]) >= 1 and pst[0x01][0] != 2:
+                        print(f"[bitra-wwan] Packet session lost (status={pst[0x01][0]}), reconnecting...", flush=True)
+                        raise RuntimeError("Packet session lost")
+                    rc_n, _, nst = nas.txrx(0x0024, b"", timeout=5.0)
+                    if rc_n == 0 and 0x01 in nst and len(nst[0x01]) >= 3:
+                        reg, ps = nst[0x01][0], nst[0x01][2]
+                        if reg != 1 or ps != 1:
+                            nas_bad += 1
+                            if nas_bad >= 2:
+                                print(f"[bitra-wwan] NAS detached (reg={reg}, ps={ps}), reconnecting...", flush=True)
+                                raise RuntimeError("NAS detached")
+                        else:
+                            nas_bad = 0
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    print(f"[bitra-wwan] Status check warning: {e}", flush=True)
+    finally:
+        if handle is not None:
+            try:
+                print(f"[bitra-wwan] Stopping network handle=0x{handle:08x}...", flush=True)
+                wds.txrx(0x0021, tlv(0x01, struct.pack("<I", handle)), timeout=5.0)
+            except Exception as e:
+                print(f"[bitra-wwan] Stop network warning: {e}", flush=True)
+        run(["ip", "route", "del", "default", "dev", RMNET_DEV], check=False)
+        run(["ip", "addr", "flush", "dev", RMNET_DEV], check=False)
+        if os.path.exists("/run/bitra-wwan.env"):
+            os.remove("/run/bitra-wwan.env")
+        try:
+            nas.close()
+        except Exception:
+            pass
+        wds.close()
+
+def cmd_status():
+    ensure_mhi0_qrtr()
+    print("=== QRTR QMI Services (WDS/WDA/NAS/UIM) ===")
+    try:
+        out = subprocess.check_output(["qrtr-lookup"], text=True)
+        for line in out.splitlines():
+            p = line.split()
+            if len(p) >= 5 and p[0] in ("1", "2", "3", "5", "11", "26"):
+                print(" ", line)
+    except Exception as e:
+        print("  qrtr-lookup error:", e)
+    print("=== SIM Slots & Signal (qrtr://3) ===")
+    for flag in ("--uim-get-slot-status", "--nas-get-signal-info", "--nas-get-serving-system"):
+        r = run(["qmicli", "-d", "qrtr://3", flag], check=False)
+        if r.returncode == 0:
+            for line in r.stdout.splitlines():
+                if any(k in line for k in ("slot", "Card status", "Slot status", "5G:", "LTE:", "GSM:", "RSRP", "SNR", "RSSI", "Registration state", "PS:", "CS:", "MCC:", "MNC:", "Radio interfaces")):
+                    print(" ", line)
+    print("=== Cellular Interface (rmnet_data0) ===")
+    r = run(["ip", "-4", "addr", "show", RMNET_DEV], check=False)
+    print(r.stdout.strip() if r.returncode == 0 else "  rmnet_data0 not created yet")
+    if os.path.isfile("/run/bitra-wwan.env"):
+        print("=== Active Session (/run/bitra-wwan.env) ===")
+        print(open("/run/bitra-wwan.env").read().strip())
+
+def main():
+    cfg = load_conf()
+    ap = argparse.ArgumentParser(description="RMX3370 SDX55M 5G/4G QMI cellular data manager")
+    ap.add_argument("action", choices=["up", "down", "status", "daemon"])
+    ap.add_argument("--slot", type=int, default=int(cfg["WWAN_SLOT"] or 1))
+    ap.add_argument("--apn", default=cfg["WWAN_APN"])
+    ap.add_argument("--metric", type=int, default=int(cfg["WWAN_METRIC"] or 700))
+    ap.add_argument("--foreground", "-f", action="store_true", help="Run in foreground instead of systemd service")
+    args = ap.parse_args()
+
+    if args.action == "status":
+        cmd_status()
+    elif args.action == "up":
+        if args.foreground:
+            cmd_daemon(args.slot, args.apn, args.metric)
+        else:
+            os.execvp("systemctl", ["systemctl", "start", "bitra-wwan.service"])
+    elif args.action == "down":
+        os.execvp("systemctl", ["systemctl", "stop", "bitra-wwan.service"])
+    elif args.action == "daemon":
+        cmd_daemon(args.slot, args.apn, args.metric)
+
+if __name__ == "__main__":
+    sys.exit(main())
+WWANPY
+chmod 755 "$STAGE/usr/sbin/bitra-wwan"
+
+cat > "$STAGE/etc/systemd/system/bitra-wwan.service" << "WWANUNIT"
+[Unit]
+Description=RMX3370 SDX55M 5G/4G Cellular Data (QMI over QRTR + rmnet_data0)
+After=bitra-sdx55-sahara.service qrtr-ns.service ModemManager.service
+Wants=qrtr-ns.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/bitra-wwan
+ExecStart=/usr/sbin/bitra-wwan daemon
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+WWANUNIT
+
+cat > "$STAGE/DEBIAN/conffiles" << CONF
+/etc/default/bitra-wwan
+CONF
+
 cat > "$STAGE/DEBIAN/control" << CTRL
 Package: bitra-device-support
 Version: $VER
@@ -878,6 +1367,7 @@ CTRL
 cat > "$STAGE/DEBIAN/postinst" << "POST"
 #!/bin/sh
 set -e
+rm -f /etc/NetworkManager/conf.d/99-bitra-wifi-powersave-off.conf
 if [ -d /etc/systemd/system/multi-user.target.wants ]; then
   ln -sf /etc/systemd/system/bitra-usb-gadget.service /etc/systemd/system/multi-user.target.wants/bitra-usb-gadget.service
   mkdir -p /etc/systemd/system/timers.target.wants

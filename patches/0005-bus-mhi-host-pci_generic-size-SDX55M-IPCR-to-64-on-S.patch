@@ -1,0 +1,38 @@
+From 1b62f9d0a68f8e1ca63561fd24d4d07218c3b0cc Mon Sep 17 00:00:00 2001
+From: ut-bitra <ut-bitra@localhost>
+Date: Sun, 22 Nov 2026 09:57:13 +0800
+Subject: [PATCH] bus: mhi: host: pci_generic: size SDX55M IPCR to 64 on
+ SW_DATA ER2
+
+Increase IPCR (ch 20/21) ring from 8 to 64 descriptors on SW_DATA event ring 2 (256 entries) so all 35+ SDX55M QRTR QMI services (WDS/WDA/NAS/DMS/UIM/WMS) register reliably on cold boot without burst drops, while preserving upstream ER 3-6 and IPA HW_DATA ER 5/6 (IP_HW0 ch 100/101) untouched.
+---
+ drivers/bus/mhi/host/pci_generic.c | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/bus/mhi/host/pci_generic.c b/drivers/bus/mhi/host/pci_generic.c
+index cd879bf92..1e97ae118 100644
+--- a/drivers/bus/mhi/host/pci_generic.c
++++ b/drivers/bus/mhi/host/pci_generic.c
+@@ -417,8 +417,8 @@ static const struct mhi_channel_config modem_qcom_sdx55_mhi_channels[] = {
+ 	MHI_CHANNEL_CONFIG_DL(15, "QMI", 32, 0),
+ 	MHI_CHANNEL_CONFIG_UL(18, "IP_CTRL", 32, 0),
+ 	MHI_CHANNEL_CONFIG_DL(19, "IP_CTRL", 32, 0),
+-	MHI_CHANNEL_CONFIG_UL(20, "IPCR", 8, 0),
+-	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 8, 0),
++	MHI_CHANNEL_CONFIG_UL(20, "IPCR", 64, 2),
++	MHI_CHANNEL_CONFIG_DL(21, "IPCR", 64, 2),
+ 	MHI_CHANNEL_CONFIG_UL(32, "DUN", 32, 0),
+ 	MHI_CHANNEL_CONFIG_DL(33, "DUN", 32, 0),
+ 	MHI_CHANNEL_CONFIG_UL_FP(34, "FIREHOSE", 32, 0),
+@@ -432,7 +432,7 @@ static const struct mhi_channel_config modem_qcom_sdx55_mhi_channels[] = {
+ static struct mhi_event_config modem_qcom_sdx55_mhi_events[] = {
+ 	MHI_EVENT_CONFIG_CTRL(0, 64),
+ 	MHI_EVENT_CONFIG_SW_DATA(1, 256),
+-	MHI_EVENT_CONFIG_DATA(2, 128),
++	MHI_EVENT_CONFIG_SW_DATA(2, 256),
+ 	MHI_EVENT_CONFIG_SW_DATA(3, 64),
+ 	MHI_EVENT_CONFIG_SW_DATA(4, 64),
+ 	MHI_EVENT_CONFIG_HW_DATA(5, 1024, 100),
+-- 
+2.43.0
+
