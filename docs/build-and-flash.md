@@ -54,6 +54,8 @@ cd ..
 >   4. **SDX55M 5G modem firmware & carrier MCFG** — **Entire `image/sdx55m/*` (`sbl1.mbn`, `qdsp6sw.mbn`, `apps.mbn`, `aop.mbn`, `tz.mbn`, `hyp.mbn`, `acdb.mbn`, `multi_image*.mbn`, `xbl_cfg.elf`, `apdp.mbn`, `devcfg.mbn`, `sec.elf`)** and **`image/modem_pr/*`** from stock **`modem` (`NON-HLOS.bin`)**.
 >   5. **Device-unique SDX55M EFS read-only snapshot** — **`mdm1m9kefs1`, `mdm1m9kefs2`, `mdm1m9kefs3`, `mdmddr`** dumped **read-only** from your own phone's UFS partitions via `sudo bitra-extract-sdx55-fw`. (**Never share your EFS files and never write to raw UFS EFS partitions.**)
 >   6. **Adreno 650 GPU firmware (for Display / GPU / Phosh)** — **Stock device-signed `firmware/a650_zap.elf` -> `/lib/firmware/qcom/sm8250/realme/bitra/a650_zap.mbn`** from stock **`vendor` (`vendor.img`)**, paired with **upstream `linux-firmware` `qcom/a650_sqe.fw` (`>= v95`, stock Android v93 is rejected by Linux 7.4) & `qcom/a650_gmu.bin`**.
+>   7. **QCA6390 Bluetooth 5.2 firmware** — **`image/htbtfw20.tlv` & `image/htnv20.bin`** from stock **`bluetooth` partition (`/dev/sde5`)** -> `/lib/firmware/qca/`.
+>   8. **Audio DSP (`ADSP`) firmware** — **`image/adsp.mdt`, `image/adsp.b00`–`adsp.b18`, `image/adspr.jsn`, `image/adspua.jsn`** from stock **`modem` partition (`/dev/sde4` / `NON-HLOS.bin`)** -> `/lib/firmware/qcom/sm8250/realme/bitra/`.
 
 > **Pre-Extracted Generic Stock Firmware Pack (GitHub Release)**: To save time, the **generic (non-device-unique)** stock files (`bitra_dtbo_0.dtbo`, QCA6390 Wi-Fi 6 firmware, SDX55M `sdx55m/*`, `modem_pr/*`, and Adreno 650 GPU `a650_zap.mbn` / `a650_sqe.fw` / `a650_gmu.bin`) are also attached to the **[`firmware-rmx3370-stock` GitHub Release](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.xz`). **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) contain your phone's personal IMEI and are STRICTLY EXCLUDED — you must always extract them read-only from your own phone via `sudo bitra-extract-sdx55-fw`.**
 
@@ -90,14 +92,14 @@ make -j$(nproc) -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" \
 
 ### 4.2 Build `.deb` Packages
 ```bash
-# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra11_1_arm64.deb
+# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra12_1_arm64.deb
 OUT="$PWD/out/server-build" bash tools/pkg_kernel_deb.sh
 
-# Device integration package -> out/debs/bitra-device-support_1.0_arm64.deb
+# Device integration package -> out/debs/bitra-device-support_1.1_arm64.deb
 # Includes: USB CDC-ECM service, key-only SSH config, NetworkManager usb0 unmanaged rule,
 #           compact initramfs-tools config (MODULES=list), Wi-Fi MAC udev rule,
 #           24/7 anti-swelling charge-limit systemd timer, 24/7 no-suspend policy
-bash tools/pkg_device_support_deb.sh 1.0
+bash tools/pkg_device_support_deb.sh 1.1
 ```
 
 ---
@@ -109,12 +111,12 @@ bash tools/pkg_device_support_deb.sh 1.0
 # installs server packages + our two .debs via qemu-aarch64-static chroot,
 # generates compact initrd (< 8 MiB), and outputs:
 #   out/ubuntu-24.04.5-bitra-server-arm64.tar.gz
-#   out/initrd.img-7.4.0-rc3-bitra11
+#   out/initrd.img-7.4.0-rc3-bitra12
 bash tools/build_ubuntu_rootfs.sh
 
 # Injects DTBO sink symbols, verifies offline fdtoverlay apply, checks initrd <= 14 MiB,
 # builds Android boot_v2 image, and appends 96 MiB AVB hash footer:
-#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra11.img
+#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra12.img
 OUT="$PWD/out/server-build" bash tools/make_ubuntu_boot.sh
 ```
 
@@ -171,12 +173,12 @@ chroot /mnt /usr/bin/python3 -c 'import ctypes; ctypes.CDLL("libc.so.6").syscall
 
 ### 7.1 Always RAM-Test Before Flashing
 ```bash
-fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra11.img
+fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra12.img
 ```
 Wait ~20–25 seconds, then SSH in:
 ```bash
 ssh ubuntu@192.168.2.15
-uname -a                    # 7.4.0-rc3-bitra11 aarch64
+uname -a                    # 7.4.0-rc3-bitra12 aarch64
 systemctl is-system-running # running (0 failed units)
 df -h /                     # /dev/sda11 ~222G
 ```
@@ -255,13 +257,44 @@ sudo bitra-desktop status
 sudo bitra-desktop stop
 ```
 
+### 7.2d Bluetooth 5.2 (`QCA6390`) & Stereo Speakers / Internal Microphones (`ADSP` + `TFA9874` + `WCD9380`)
+
+On the phone over SSH:
+```bash
+# 1. Install BlueZ, PipeWire Bluetooth plugin, Qualcomm PD-Mapper, and ALSA UCM2 tools
+sudo apt update && sudo apt install -y \
+  bluez libspa-0.2-bluetooth protection-domain-mapper alsa-utils alsa-ucm-conf libcanberra-pulse
+
+# 2. Extract Bluetooth & ADSP firmware read-only from stock UFS partitions
+sudo mkdir -p /tmp/ro_bt /tmp/ro_modem /lib/firmware/qca /lib/firmware/qcom/sm8250/realme/bitra
+sudo mount -o ro /dev/sde5 /tmp/ro_bt
+sudo cp -f /tmp/ro_bt/image/htbtfw20.tlv /tmp/ro_bt/image/htnv20.bin /lib/firmware/qca/
+sudo umount /tmp/ro_bt
+
+sudo mount -o ro /dev/sde4 /tmp/ro_modem
+sudo cp -f /tmp/ro_modem/image/adsp.mdt /tmp/ro_modem/image/adsp.b* \
+           /tmp/ro_modem/image/adspr.jsn /tmp/ro_modem/image/adspua.jsn \
+           /lib/firmware/qcom/sm8250/realme/bitra/
+sudo umount /tmp/ro_modem
+sudo chmod 644 /lib/firmware/qca/ht* /lib/firmware/qcom/sm8250/realme/bitra/adsp*
+
+# 3. Ensure user belongs to audio/bluetooth groups and enable services
+sudo usermod -aG audio,bluetooth ubuntu
+sudo systemctl enable pd-mapper.service bluetooth.service bitra-bt-addr.service
+
+# 4. Verify after booting bitra12 + bitra-device-support 1.1:
+hciconfig -a
+bluetoothctl show
+wpctl status    # Shows Stereo Speakers (Dual TFA9874) + Internal Microphones (WCD9380)
+```
+
 ### 7.3 Flash `boot` Partition & Verify Cold Boot
 ```bash
 # On the phone (reboots straight into Fastboot, no buttons needed):
 sudo reboot bootloader
 
 # On your host:
-fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra11.img
+fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra12.img
 fastboot -s <SERIAL> reboot
 ```
 After ~25 seconds, cold-boot SSH (`ssh ubuntu@192.168.2.15`) is live and `bitra-oled-blank.service` puts the OLED panel into true DPMS power-off (0 burn-in while headless).

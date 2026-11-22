@@ -248,3 +248,51 @@ wifi.powersave = 2`) in `bitra-device-support` (latency drops to ~6 ms consisten
 - **Symptom**: On roughly half of cold boots, `arm-smmu 3da0000.iommu` (`&adreno_smmu`) timed out at `t ~ 10.74s` with `deferred probe timeout, ignoring dependency` (`probe failed with error -110`), causing `adreno 3d00000.gpu` to fail with `-19` (`-ENODEV`) and leaving `/dev/dri/card0` unavailable.
 - **Root Cause**: `CONFIG_ARM_SMMU=y` is built-in, and `&adreno_smmu` (`3da0000.iommu`) depends on `&gpucc` (`GPU_CC_AHB_CLK`, `GPU_CX_GDSC`), which was compiled as a loadable module (`CONFIG_SM_GPUCC_8250=m`). When `systemd-udevd` loaded `gpucc_sm8250.ko` right around Linux's 10-second default `deferred_probe_timeout`, it intermittently lost the race.
 - **Fix**: Set `CONFIG_SM_GPUCC_8250=y` and `CONFIG_SM_DISPCC_8250=y` in `kernel-cfg/10-bitra-server.config` so both GPU and display clock controllers are built-in alongside `gcc-sm8250` and `arm-smmu`. `3da0000.iommu` now probes deterministically during early boot (`t < 1s`) with zero deferred-probe timeouts.
+
+---
+
+## 33. QCA6390 Bluetooth UART `Invalid line -19` & Unconfigured Controller (`00:00:00:00:5A:AD`)
+- **Symptoms**:
+  1. Enabling `&uart6` without an alias logged `qcom_geni_serial 998000.serial: Invalid line -19` and blocked `sync_state()`.
+  2. After fixing the alias and downloading `qca/htbtfw20.tlv` + `qca/htnv20.bin`, `hci0` stayed in `DOWN RAW` (`00:00:00:00:5A:AD`) and `btmgmt` hung when run from a systemd service (where stdin is `/dev/null`).
+- **Fix**:
+  1. Add `serial1 = &uart6;` under `aliases` in `sm8250-realme-bitra.dts`.
+  2. Ship `bitra-bt-addr.service` (`bitra-device-support >= 1.1`) running `Before=bluetooth.service`, polling until `hci0` firmware download completes and invoking `true | timeout 3 btmgmt --index 0 public-addr "$BTMAC"` (piping stdin avoids BlueZ `btmgmt`'s `epoll_ctl` `EPERM` on `/dev/null`).
+
+---
+
+## 34. Dual NXP `TFA9874` Stereo Speakers: `TDMLUTER` (`TDMNBCK=0`) & `TERTIARY_MI2S_RX` on `SD1` (`gpio137`)
+- **Symptoms**:
+  1. With `TDMNBCK=1`, `tfa9874` reported `CLKS not locked (st0=0x0056 st1=0x0100)` (`TDMERR=1, TDMLUTER=1`).
+  2. After fixing `TDMNBCK=0` (32 BCLKs/frame for 16-bit stereo), both amps locked (`st1=0xe2c2`, `PLLS=CLKS=AMPS=SWS=DCDCA=1`) yet produced silence.
+- **Root Cause**:
+  1. On `TFA9874`, `TDMNBCK = 0` selects 32 BCLKs/frame (16-bit stereo I2S), `1` = 48 BCLKs, `2` = 64 BCLKs.
+  2. In stock RMX3370 `live.dts`, `qcom,msm-dai-q6-mi2s-tert` uses `qcom,msm-mi2s-rx-lines = <0x02>` (**SD line 1 = `gpio137` `mi2s2_data1`**) for speaker RX and `tx-lines = <0x01>` (`gpio134` `mi2s2_data0`) for VI feedback. Upstream `sm8250.dtsi`'s `tert_mi2s_active` only muxes `gpio133/134/135`.
+- **Fix**: Set `TDMNBCK=0` for 16-bit I2S in `sound/soc/codecs/tfa9874.c`, add `tert_mi2s_data1_active` (`gpio137`, `mi2s2_data1`), and set `qcom,sd-lines = <1>` on `&q6afedai` `dai@20` (`TERTIARY_MI2S_RX`). Verified via dual-channel 880 Hz / 1320 Hz acoustic loopback (+50 dB SNR on both speakers and both `WCD9380` analog mics).
+
+---
+
+## 35. `systemd-backlight@backlight:ae94000.dsi.0.service` Fails After Headless OLED Blank
+- **Symptom**: On headless boot, `systemd-backlight` attempted to restore saved brightness `0` clamped up to `102` after `bitra-oled-blank.service` powered off the panel, failing with `EINVAL` and marking systemd `degraded`.
+- **Fix**: Mask `systemd-backlight@backlight:ae94000.dsi.0.service` in `bitra-device-support >= 1.1` so headless boot stays at `0 failed units` and OLED stays strictly off until `bitra-desktop start`.
+
+---
+
+## 36. Stereo Audio Quiet (-48 dB) & Channel Crosstalk (`q6asm-dai` `S24_LE` + `TFA9874` `TDMFSPOL`/`TDMDCE`)
+- **Symptoms**:
+  1. Even at 100% PipeWire volume, speaker output was whisper-quiet and the TFA9874 boost converter stayed at battery voltage (`reg 0x17 = 0x0144`, ~3.8 V).
+  2. In GNOME Settings → Sound → Test, the Left/Right buttons were silent until `libcanberra-pulse` was installed; once working, Left played on both earpiece and bottom speaker while Right played only on the earpiece.
+- **Root Causes**:
+  1. `q6asm-dai` (`MultiMedia1`) advertises `S16_LE | S24_LE`. PipeWire picked `S24_LE`, which suffered an exact **8-bit (-48 dB) right-shift** when routed into the 16-bit `TERTIARY_MI2S_RX` backend on SM8250.
+  2. Standard I2S starts Left (slot 0) on the **falling** edge of WS (`WS=0`), which requires **`TDMFSPOL = 1`** on TFA9874 (`TDMFSPOL = 0` inverted Left/Right slots).
+  3. Enabling **`TDMDCE`** (`reg 0x23 bit 1`) routed the secondary TDM slot (`TDMDCS` = opposite stereo channel) into the amp, bleeding the opposite channel into `0x34`.
+- **Fix**:
+  1. Ship `/etc/wireplumber/main.lua.d/51-bitra-alsa-s16.lua` in `bitra-device-support >= 1.1` forcing `["audio.format"] = "S16LE"` on `alsa_output.platform-sound.*` / `alsa_input.platform-sound.*` — instantly restores +48 dB loudness and wakes up the 9V boost converter (`reg 0x17 = 0x0288`), allowing safe stock-conservative amp gains (`SpkrLeft=8` / `SpkrRight=9`, `TDMSPKG=7/6`).
+  2. Fix `tfa9874.c` to set `TDMFSPOL = 1` for I2S `NB_NF`, disable `TDMDCE` (`reg 0x23 = 0x0001`), and apply stock RMX3370 `reg 0x68[6:0] = 0x4b`. Verified ~19 dB acoustic Left/Right isolation (`0x34` = top earpiece Left only, `0x35` = bottom speaker Right only).
+  3. Install `libcanberra-pulse` alongside `sound-theme-freedesktop` for GNOME Settings test sounds.
+
+---
+
+## 37. USB CDC-ECM (`192.168.2.15`) Drops to `state=default` After Idle/Host Sleep
+- **Symptom**: Because `mp2650` manages VBUS instead of `pm8150b`, `pm8150b_typec` stays in `TOGGLING` and `dwc3` (`a600000.usb`) can drop to `state=default` after host sleep or cable settle. Cycling `soft_connect` with a `0.3 s` pause re-enumerated too quickly for macOS DHCP (leaving the host stuck on `169.254.x.x`).
+- **Fix**: Ship and enable `bitra-usb-watch.service` in `bitra-device-support >= 1.1` polling every 4 s when `mp2650-charger/online == 1` and `role != host`; when `state != configured`, it cycles `soft_connect` (`disconnect`, `sleep 1`, `connect`) so macOS cleanly re-triggers DHCP and recovers `192.168.2.15` automatically.

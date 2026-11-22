@@ -18,6 +18,7 @@ mkdir -p \
   "$STAGE/etc/systemd/sleep.conf.d" \
   "$STAGE/etc/systemd/logind.conf.d" \
   "$STAGE/etc/ssh/sshd_config.d" \
+  "$STAGE/etc/wireplumber/main.lua.d" \
   "$STAGE/etc/chrony/conf.d" "$STAGE/etc/NetworkManager/conf.d" "$STAGE/etc/udev/rules.d" "$STAGE/etc/default" \
   "$STAGE/usr/lib/bitra" \
   "$STAGE/usr/sbin"
@@ -1450,6 +1451,210 @@ ExecStart=/bin/bash -c 'for i in $(seq 1 20); do [ -e /sys/class/graphics/fb0/bl
 WantedBy=multi-user.target
 OLEDBLANK
 
+# 13a-wp. WirePlumber ALSA S16_LE rule for Qualcomm q6asm-dai
+# PipeWire defaults to S24_LE when q6asm-dai advertises S16_LE|S24_LE, which
+# triggers an 8-bit (-48 dB) right-shift when routing into the 16-bit
+# TERTIARY_MI2S_RX backend on SM8250. Forcing S16LE restores full loudness.
+cat > "$STAGE/etc/wireplumber/main.lua.d/51-bitra-alsa-s16.lua" << 'WPEOF'
+table.insert(alsa_monitor.rules, {
+  matches = {
+    {
+      { "node.name", "matches", "alsa_output.platform-sound.*" },
+    },
+    {
+      { "node.name", "matches", "alsa_input.platform-sound.*" },
+    },
+  },
+  apply_properties = {
+    ["audio.format"] = "S16LE",
+  },
+})
+WPEOF
+
+# 13b. Persistent USB CDC-ECM auto-recovery watchdog (handles macOS sleep/wake, replug & tcpm TOGGLING)
+cat > "$STAGE/usr/sbin/bitra-usb-watch" << "USBWSH"
+#!/bin/bash
+set -u
+
+UDC="/sys/class/udc/a600000.usb"
+ROLE="/sys/class/usb_role/a600000.usb-role-switch/role"
+ONLINE="/sys/class/power_supply/mp2650-charger/online"
+GADGET_UDC="/sys/kernel/config/usb_gadget/g1/UDC"
+
+while true; do
+  sleep 4
+  [ -r "$ONLINE" ] && [ "$(cat "$ONLINE" 2>/dev/null || echo 0)" = "1" ] || continue
+  [ -r "$ROLE" ] && [ "$(cat "$ROLE" 2>/dev/null || echo device)" = "host" ] && continue
+  STATE="$(cat "$UDC/state" 2>/dev/null || echo unknown)"
+  if [ "$STATE" != "configured" ]; then
+    logger -t bitra-usb-watch "USB gadget state=$STATE while VBUS online; cycling soft_connect"
+    [ -w "$ROLE" ] && echo device > "$ROLE" 2>/dev/null || true
+    if [ -r "$GADGET_UDC" ] && [ -z "$(cat "$GADGET_UDC" 2>/dev/null || true)" ]; then
+      echo a600000.usb > "$GADGET_UDC" 2>/dev/null || true
+    fi
+    if [ -w "$UDC/soft_connect" ]; then
+      echo disconnect > "$UDC/soft_connect" 2>/dev/null || true
+      sleep 1
+      echo connect > "$UDC/soft_connect" 2>/dev/null || true
+    fi
+    sleep 2
+    ip link set usb0 up 2>/dev/null || true
+    # Back off 10s after recovery attempt so we do not spam if plugged into a dumb charger
+    sleep 10
+  fi
+done
+USBWSH
+chmod 755 "$STAGE/usr/sbin/bitra-usb-watch"
+
+cat > "$STAGE/etc/systemd/system/bitra-usb-watch.service" << "USBWUNIT"
+[Unit]
+Description=RMX3370 USB CDC-ECM Auto-Recovery Watchdog (preserves OTG host mode)
+After=bitra-usb-gadget.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/bitra-usb-watch
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+USBWUNIT
+
+# 14. QCA6390 Bluetooth deterministic public address (before bluetooth.service)
+cat > "$STAGE/usr/sbin/bitra-bt-addr" << "BTSH"
+#!/bin/bash
+set -euo pipefail
+
+BTMAC=$(python3 - << "PYMAC"
+import hashlib
+mid = open("/etc/machine-id").read().strip().encode()
+h = hashlib.sha256(mid + b"-bitra-bt").digest()
+b = bytearray(h[:6])
+b[0] = (b[0] & 0xfe) | 0x02  # locally administered unicast
+print(":".join(f"{x:02X}" for x in b))
+PYMAC
+)
+
+# Wait for QCA6390 UART firmware download (htbtfw20.tlv + htnv20.bin) to complete,
+# then set deterministic public address via `true | btmgmt` (avoids epoll EPERM on /dev/null).
+for i in $(seq 1 40); do
+  if [ -d /sys/class/bluetooth/hci0 ]; then
+    if true | timeout 3 btmgmt --index 0 info 2>/dev/null | grep -qiE "addr [0-9a-f:]{17}" &&        ! true | timeout 3 btmgmt --index 0 info 2>/dev/null | grep -qi "00:00:00:00:5a:ad"; then
+      echo "[bitra-bt-addr] hci0 already configured."
+      exit 0
+    fi
+    if true | timeout 3 btmgmt --index 0 public-addr "$BTMAC" 2>/dev/null; then
+      echo "[bitra-bt-addr] Configured hci0 public address: $BTMAC"
+      exit 0
+    fi
+  fi
+  sleep 0.5
+done
+echo "[bitra-bt-addr] Warning: timed out waiting for hci0 setup." >&2
+exit 0
+BTSH
+chmod 755 "$STAGE/usr/sbin/bitra-bt-addr"
+
+cat > "$STAGE/etc/systemd/system/bitra-bt-addr.service" << "BTUNIT"
+[Unit]
+Description=RMX3370 QCA6390 Bluetooth Public Address Setup
+After=systemd-udev-settle.service
+Before=bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/bitra-bt-addr
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+BTUNIT
+
+# 15. ALSA UCM2 profile for realme-GT-Neo2-bitra (Dual TFA9874 Speakers + WCD9380 Dual Analog Mics)
+mkdir -p "$STAGE/usr/share/alsa/ucm2/Qualcomm/sm8250" "$STAGE/usr/share/alsa/ucm2/conf.d/sm8250"
+cat > "$STAGE/usr/share/alsa/ucm2/Qualcomm/sm8250/realme-GT-Neo2-bitra.conf" << "UCMTOP"
+Syntax 4
+
+SectionUseCase."HiFi" {
+	File "/Qualcomm/sm8250/realme-GT-Neo2-bitra-HiFi.conf"
+	Comment "HiFi quality Music."
+}
+UCMTOP
+
+cat > "$STAGE/usr/share/alsa/ucm2/Qualcomm/sm8250/realme-GT-Neo2-bitra-HiFi.conf" << "UCMHIFI"
+SectionVerb {
+	# Place FE->BE mixer routing in Verb EnableSequence so PipeWire/ACP
+	# can open playback and capture PCMs cleanly during cold-boot probing.
+	EnableSequence [
+		cset "name='TERT_MI2S_RX Audio Mixer MultiMedia1' 1"
+		cset "name='SpkrLeft Speaker Volume' 8"
+		cset "name='SpkrRight Speaker Volume' 9"
+		cset "name='MultiMedia3 Mixer TX_CODEC_DMA_TX_3' 1"
+		cset "name='TX_AIF1_CAP Mixer DEC0' 1"
+		cset "name='TX_AIF1_CAP Mixer DEC1' 1"
+		cset "name='TX DEC0 MUX' SWR_MIC"
+		cset "name='TX DEC1 MUX' SWR_MIC"
+		cset "name='TX SMIC MUX0' ADC0"
+		cset "name='TX SMIC MUX1' ADC3"
+		cset "name='ADC1_MIXER Switch' 1"
+		cset "name='ADC4_MIXER Switch' 1"
+		cset "name='ADC1 Switch' 1"
+		cset "name='ADC4 Switch' 1"
+		cset "name='ADC4 MUX' INP5"
+		cset "name='ADC1 Volume' 12"
+		cset "name='ADC4 Volume' 12"
+		cset "name='TX_DEC0 Volume' 84"
+		cset "name='TX_DEC1 Volume' 84"
+	]
+
+	DisableSequence [
+		cset "name='TERT_MI2S_RX Audio Mixer MultiMedia1' 0"
+		cset "name='MultiMedia3 Mixer TX_CODEC_DMA_TX_3' 0"
+	]
+
+	Value {
+		TQ "HiFi"
+	}
+}
+
+SectionDevice."Speaker" {
+	Comment "Stereo Speakers (Dual TFA9874)"
+
+	EnableSequence [
+		cset "name='TERT_MI2S_RX Audio Mixer MultiMedia1' 1"
+	]
+
+	Value {
+		PlaybackPriority 200
+		PlaybackPCM "hw:${CardId},0"
+		PlaybackChannels 2
+	}
+}
+
+SectionDevice."Mic" {
+	Comment "Internal Microphones (WCD9380 AMIC1 + AMIC5)"
+
+	EnableSequence [
+		cset "name='MultiMedia3 Mixer TX_CODEC_DMA_TX_3' 1"
+		cset "name='ADC1 Switch' 1"
+		cset "name='ADC4 Switch' 1"
+	]
+
+	DisableSequence [
+		cset "name='ADC1 Switch' 0"
+		cset "name='ADC4 Switch' 0"
+	]
+
+	Value {
+		CapturePriority 200
+		CapturePCM "hw:${CardId},2"
+		CaptureChannels 2
+	}
+}
+UCMHIFI
+ln -sf ../../Qualcomm/sm8250/realme-GT-Neo2-bitra.conf "$STAGE/usr/share/alsa/ucm2/conf.d/sm8250/realme-GT-Neo2-bitra.conf"
+
 cat > "$STAGE/DEBIAN/conffiles" << CONF
 /etc/default/bitra-wwan
 /etc/phosh/phoc.ini
@@ -1484,6 +1689,11 @@ if [ -d /etc/systemd/system/multi-user.target.wants ]; then
   ln -sf /etc/systemd/system/bitra-sdx55-efs-sync.service /etc/systemd/system/multi-user.target.wants/bitra-sdx55-efs-sync.service
   ln -sf /etc/systemd/system/bitra-sdx55-sim-init.service /etc/systemd/system/multi-user.target.wants/bitra-sdx55-sim-init.service
   ln -sf /etc/systemd/system/bitra-oled-blank.service /etc/systemd/system/multi-user.target.wants/bitra-oled-blank.service
+  ln -sf /etc/systemd/system/bitra-bt-addr.service /etc/systemd/system/multi-user.target.wants/bitra-bt-addr.service
+  ln -sf /etc/systemd/system/bitra-usb-watch.service /etc/systemd/system/multi-user.target.wants/bitra-usb-watch.service
+  if [ -f /usr/lib/systemd/system/pd-mapper.service ]; then ln -sf /usr/lib/systemd/system/pd-mapper.service /etc/systemd/system/multi-user.target.wants/pd-mapper.service; fi
+  # Prevent systemd-backlight from fighting bitra-oled-blank.service on headless boots
+  ln -sf /dev/null /etc/systemd/system/systemd-backlight@backlight:ae94000.dsi.0.service
 fi
 exit 0
 POST

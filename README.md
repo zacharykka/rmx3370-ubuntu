@@ -6,10 +6,10 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 - **[Build, Package & Flash Guide](docs/build-and-flash.md)** — Complete step-by-step instructions from upstream Linux source to cold-booting Ubuntu 24.04.5 LTS Server, Wi-Fi 6 setup, anti-swelling charge control, and recovery.
 - **[Bring-Up Pitfalls & Debugging Notes](docs/pitfalls-and-debugging.md)** — Every real RMX3370 hardware/bootloader/initramfs pitfall hit during development (with root causes, `pstore` evidence, and exact fixes).
 - **[Hardware & Milestone Status](docs/status.md)** — Live bring-up checklist and verified hardware capabilities.
-- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra11`).
+- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra12`).
 - **[Technical Debt Tracker](docs/tech-debt.md)** — Known temporary workarounds and exit criteria.
 
-## Verified Working Hardware (`7.4.0-rc3-bitra11` + `bitra-device-support 1.0`)
+## Verified Working Hardware (`7.4.0-rc3-bitra12` + `bitra-device-support 1.1`)
 
 | Subsystem | Hardware / Driver | Status | Notes |
 |---|---|---|---|
@@ -24,6 +24,8 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | GPU (3D / Vulkan) | Qualcomm `Adreno 650` (`msm` + `GMU` + `freedreno` / `Turnip`) | **Working** | Mesa OpenGL 4.6 / ES 3.2 (`FD650`) + Vulkan (`Turnip`); uses stock device-signed `a650_zap.mbn` + upstream `a650_sqe.fw`/`a650_gmu.bin` |
 | Touchscreen | `Synaptics S3908` (`synaptics_tcm_i2c`, `i2c13@0x4b`) | **Working** | Native TouchComm v1 I2C driver, 10-finger multitouch (`8639x19199` subpixel native) |
 | Hardware Buttons | Power (`pm8941_pwrkey`), Volume Up/Down (`pm8150` GPIO 6/7) | **Working** | All three physical side buttons report standard Linux input keycodes |
+| Bluetooth 5.2 | Qualcomm `QCA6390` (`hci_qca` over `&uart6` + `qca6390-pmu`) | **Working** | Classic (A2DP/HFP audio) + BLE 5.2 + HID/UHID; automatic deterministic public address (`bitra-bt-addr.service`) |
+| Stereo Speakers & Mics | `ADSP` (`pd-mapper`) + Dual NXP `TFA9874` (`i2c15@0x34/0x35`) + `WCD9380` (`SoundWire`) | **Working** | Native stereo speakers (`TERTIARY_MI2S_RX` `gpio137`), dual analog mics (`AMIC1`+`AMIC5`), ALSA UCM2 + PipeWire + Phosh volume OSD |
 | Optional Touch Desktop | `Phosh` + `phoc` Wayland (`bitra-desktop`) | **Working (Optional)** | Headless `multi-user.target` by default; start/stop on demand via `sudo bitra-desktop start` / `stop` |
 | Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, Docker (`overlayfs`, `cgroup2fs`, `iptables-nft` NAT/bridge), AppArmor, `wireguard`, `nf_tables` |
 | USB Host / OTG | `pm8150b_typec` + `usb_1_dwc3` OTG + MP2650 5V boost | **Working** | Dual-role Type-C + 5V/1.25A OTG boost; verified with external USB hard drive |
@@ -41,6 +43,8 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | **Built-in 5G Modem (`SDX55M`)** | **Entire `image/sdx55m/` directory** (**`sbl1.mbn`, `qdsp6sw.mbn`, `apps.mbn`, `aop.mbn`, `tz.mbn`, `hyp.mbn`, `acdb.mbn`, `multi_image.mbn`, `multi_image_qti.mbn`, `xbl_cfg.elf`, `apdp.mbn`, `devcfg.mbn`, `sec.elf`**) | **Stock `modem` partition / official `NON-HLOS.bin`** (`image/sdx55m/`) | `/lib/firmware/updates/qcom/sdx55m/` |
 | **5G Modem Carrier Configs (MCFG)** | **Entire `image/modem_pr/` directory** (served over QRTR TFTP by `tqftpserv-sdx55`) | **Stock `modem` partition / official `NON-HLOS.bin`** (`image/modem_pr/`) | `/lib/firmware/modem_pr/` |
 | **5G Modem Read-Only EFS Snapshot** | **Device-unique `mdm1m9kefs1`, `mdm1m9kefs2`, `mdm1m9kefs3`, `mdmddr`** (**MUST be dumped read-only from YOUR OWN phone; NEVER share or overwrite raw UFS EFS!**) | **Device UFS `/dev/disk/by-partlabel/mdm1m9kefs{1,2,3}` & `mdmddr`** | `/var/lib/bitra/sdx55m-efs/` (via `sudo bitra-extract-sdx55-fw`) |
+| **Bluetooth 5.2 (`QCA6390`)** | **`htbtfw20.tlv`**, **`htnv20.bin`** | **Stock `bluetooth` partition (`/dev/sde5`)** (`image/`) | `/lib/firmware/qca/` |
+| **Audio DSP (`ADSP`)** | **`adsp.mdt`, `adsp.b00`–`adsp.b18`, `adspr.jsn`, `adspua.jsn`** | **Stock `modem` partition / official `NON-HLOS.bin`** (`image/`) | `/lib/firmware/qcom/sm8250/realme/bitra/` |
 | **Stock Rollback Backup (Strongly Recommended)** | **Original `boot.img`, `dtbo.img`, `persist.img`, `mdm1m9kefs1/2/3`** | **Your device before flashing** | Safe external backup on host |
 
 > **Pre-Extracted Generic Stock Firmware Pack (GitHub Release)**: To save time, the **generic (non-device-unique)** stock files (`bitra_dtbo_0.dtbo`, QCA6390 Wi-Fi 6 firmware, SDX55M `sdx55m/*`, `modem_pr/*`, and Adreno 650 GPU `a650_zap.mbn` / `a650_sqe.fw` / `a650_gmu.bin`) are also attached to the **[`firmware-rmx3370-stock` GitHub Release](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.xz`). **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) contain your phone's personal IMEI and are STRICTLY EXCLUDED — you must always extract them read-only from your own phone via `sudo bitra-extract-sdx55-fw`.**
@@ -85,7 +89,7 @@ sudo reboot bootloader
 ```
 
 ## Repository Layout
-- `patches/` — Clean `git format-patch` series (`0001`–`0006`) against upstream Linux `7.4.0-rc3` (`65e4fd942`): `sm8250-realme-bitra.dts`, `mp2650_charger.c`, `panel-samsung-ams662zs01.c`, `synaptics_tcm_i2c.c`, `ubwc_config.c`, and SDX55M MHI support.
+- `patches/` — Clean `git format-patch` series (`0001`–`0007`) against upstream Linux `7.4.0-rc3` (`65e4fd942`): `sm8250-realme-bitra.dts`, `mp2650_charger.c`, `panel-samsung-ams662zs01.c`, `synaptics_tcm_i2c.c`, `tfa9874.c`, `ubwc_config.c`, and SDX55M MHI support.
 - `kernel-cfg/` — Kernel config fragments (`00-base-sm8250-ram.config`, `10-bitra-server.config`).
 - `tools/` — Reproducible build, `.deb` packaging (`linux-image-*.deb`, `bitra-device-support_*.deb`), rootfs assembly, offline DTBO sink injection, and `boot_v2` + AVB hash footer scripts.
 - `docs/` — Build/flash guide, bring-up pitfalls, status ledger, kernel ABI ledger, and tech-debt tracker.
