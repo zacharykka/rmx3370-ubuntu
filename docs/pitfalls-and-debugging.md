@@ -296,3 +296,48 @@ wifi.powersave = 2`) in `bitra-device-support` (latency drops to ~6 ms consisten
 ## 37. USB CDC-ECM (`192.168.2.15`) Drops to `state=default` After Idle/Host Sleep
 - **Symptom**: Because `mp2650` manages VBUS instead of `pm8150b`, `pm8150b_typec` stays in `TOGGLING` and `dwc3` (`a600000.usb`) can drop to `state=default` after host sleep or cable settle. Cycling `soft_connect` with a `0.3 s` pause re-enumerated too quickly for macOS DHCP (leaving the host stuck on `169.254.x.x`).
 - **Fix**: Ship and enable `bitra-usb-watch.service` in `bitra-device-support >= 1.1` polling every 4 s when `mp2650-charger/online == 1` and `role != host`; when `state != configured`, it cycles `soft_connect` (`disconnect`, `sleep 1`, `connect`) so macOS cleanly re-triggers DHCP and recovers `192.168.2.15` automatically.
+
+---
+
+## 38. USB CDC-ECM (`192.168.2.15`) TX Queue Deadlock & macOS `169.254.x.x` APIPA Fallback
+- **Symptom**: While connected to an awake macOS host, `usb0` periodically dropped and macOS fell back to link-local `169.254.x.x`. Live capture showed `usb0` **receiving** every macOS `DHCPDISCOVER` and `dnsmasq` emitting `DHCPOFFER`, while `en17` received `0` packets, `dwc3` `ep1in` had `0` queued TRBs, and `tc -s qdisc show dev usb0` showed an ever-growing TX `backlog` (65+ packets, `requeues > 0`).
+- **Root Causes**:
+  1. In `drivers/usb/gadget/function/u_ether.c`, `gether_connect()` never cleared `link->is_suspend`, so a USB suspend occurring before `ecm_set_alt(1)` (or an `ecm_disable()` while `in_ep` was not yet enabled) left `is_suspend = true` permanently. Every subsequent TX packet hit `netif_stop_queue()` + `ether_wakeup_host()` (which failed with `-EINVAL` because the link was already in `U0`), deadlocking TX forever.
+  2. `gether_resume()` called `netif_start_queue()` *before* clearing `is_suspend = false` and did not call `netif_wake_queue()` to schedule the qdisc to drain the backlog.
+  3. The gadget config advertised `bmAttributes = 0x80` (no remote wakeup), `&usb_1_dwc3` lacked `snps,usb2-gadget-lpm-disable`, and `bitra-usb-watch` cycled `soft_connect` on a single transient `state=default` sample.
+- **Fix**:
+  1. Patch `drivers/usb/gadget/function/u_ether.c`: clear `link->is_suspend = false` in `gether_connect()`, clear `is_suspend` *before* calling `netif_wake_queue()` in `gether_resume()`, and auto-resume in `rx_complete()` on `status == 0` whenever RX traffic arrives from an awake host.
+  2. Add `snps,dis_u2_susphy_quirk;`, `snps,dis_enblslpm_quirk;`, and `snps,usb2-gadget-lpm-disable;` to `&usb_1_dwc3`.
+  3. In `bitra-device-support >= 1.2`: set `bmAttributes = 0xe0`, run `dnsmasq --bind-dynamic --dhcp-authoritative`, and require 2 consecutive non-`configured`/non-`suspended` polls before `bitra-usb-watch` cycles `soft_connect`.
+
+---
+
+## 39. SLPI Sensors: OPLUS `SMEM_SENSOR` (Item 130) Requirement & `hexagonrpcd` `socinfo/` Write-Loop Trap
+- **Symptoms**:
+  1. With `&slpi` and `hexagonrpcd` enabled alone, only accelerometer/gyroscope (`icm4x6xa`) probed (with inverted Z-axis), while magnetometer, ambient light (`stk3329`), and proximity returned `UNKNOWN`.
+  2. Creating `/usr/share/qcom/sm8250/realme/bitra/socinfo/` caused SLPI to match `/vendor/etc/sensors/config/*.json` and loop forever attempting to write `/mnt/vendor/persist/sensors/registry/registry/../temp.json` (rejected by read-only `hexagonrpcd`), stalling the `registry` sensor for >30 s.
+  3. Upstream `80-iio-sensor-proxy.rules` only matched `ssc-light` and `ssc-compass`, causing `iio-sensor-proxy` to exit with `No sensors`.
+- **Fix**:
+  1. Add built-in deferrable platform driver `drivers/soc/qcom/oplus_bitra_sensor_smem.c` (`CONFIG_QCOM_OPLUS_BITRA_SENSOR_SMEM=y`), matching `oplus,dtsi_no == 0x5473` (because ABL DTBO overwrites `/compatible`), which populates Qualcomm SMEM item `130` (`4768` bytes = `struct oplus_sensor_info`) at `t ~ 0.4 s` before SLPI boots at `t ~ 3.2 s`. All 6 sensors (Accel, Gyro, Mag, Compass, Light, Proximity) now probe with proper orientation.
+  2. Omit `socinfo/` so SLPI uses the pre-parsed read-only snapshot from `/var/lib/bitra/persist-sensors/registry/registry/`.
+  3. Ship `/etc/udev/rules.d/81-bitra-ssc-sensors.rules` (enabling `ssc-accel ssc-light ssc-proximity ssc-compass` + `FEEDBACKD_TYPE="vibra"` for `aw8697-haptics`) and an `iio-sensor-proxy` systemd drop-in waiting for `hexagonrpcd-sdsp.service`.
+
+---
+
+## 40. Samsung `AMS662ZS01` OLED Boot Bright-White Flash, 31-Second White Screen & Known ~0.1 s Handover Flash
+- **Symptoms**:
+  1. During boot/reboot, the OLED flashed blinding bright white for several seconds; after disabling `fb0`, the screen stayed solid bright white for **31.7 seconds** before snapping black.
+  2. Stopping Phosh without `/dev/fb0` left all 4 OLED regulators enabled because `bitra-desktop` only toggled `/sys/class/graphics/fb0/blank`.
+- **Root Causes**:
+  1. In Linux, `regulator_late_cleanup()` runs **30 seconds** after `late_initcall_sync` (`t = 31.7 s`). Meanwhile, `clk: Disabling unused clocks` turned off display clocks at `t = 0.64 s` while all 4 OLED rails (`vreg_l13a_3p0`, `vreg_l14a_1p8`, `vreg_l2c_1p15`, and `gpio125` `vout`/ELVDD-ELVSS) remained powered on from ABL — driving the unclocked OLED panel solid white for 31 seconds.
+  2. Earlier `panel-samsung-ams662zs01.c` also sent `brightness = 0x0200` + `DISPON` (`0x29`) in `.prepare()` before any frame was written to panel GRAM, causing a white/snow flash when waking the panel.
+- **Fix & Remaining Known Limitation (`TD-06`)**:
+  1. Model `gpio125` as built-in `regulator-fixed` (`vreg_panel_vout`, **without** `regulator-boot-on`), so `fixed.c` pulls `gpio125` LOW at `t = 0.25 s` *before* display clocks are disabled at `t = 0.64 s`, eliminating the 31-second white screen completely.
+  2. Ship `/etc/modprobe.d/bitra-msm.conf` (`options msm fbdev=0` + `options drm_kms_helper fbdev_emulation=0`) so headless boot never creates `/dev/fb0` or wakes the OLED; Wayland/Phosh uses `/dev/dri/card0` directly, and `bitra-desktop stop`/`blank` disables all DRM CRTCs via `DRM_IOCTL_MODE_SETCRTC` so all 4 OLED rails immediately return to `disabled`.
+  3. Match stock OPLUS `DSI_CMD_POST_ON_BACKLIGHT` in `panel-samsung-ams662zs01.c`: keep `DISPOFF` across `.prepare()`/`.enable()` with default brightness `0`, and only send `DISPON` (`0x29`) after a 20 ms frame delay on the first non-zero backlight update.
+  4. **Known limitation (`TD-06`)**: Because ABL leaves the OLED powered on when handing off to Linux and `msm.ko` is a loadable module (not built-in with Qualcomm continuous-splash handover), cutting `vreg_panel_vout` directly at `t = 0.25 s` without a preceding DSI `DISPOFF`/`SLPIN` still produces a **very brief (~0.1 s) white capacitor-discharge flash** right after leaving the Bootloader/Fastboot screen. Eliminating that final ~0.1 s flash would require upstream `msm` SM8250 continuous-splash support.
+
+---
+
+## 41. USB Type-C Video Output (DisplayPort Alt-Mode) Is Physically Unsupported on RMX3370
+- **Finding**: Verified via official hardware specifications and live `a600000.usb` link capability (`high-speed` USB 2.0 only) that the realme GT Neo 2 (`RMX3370`) Type-C receptacle only routes USB 2.0 D+/D- and CC lines (with `fsa4480@42` handling analog audio switching); SuperSpeed TX/RX lanes are not wired to the port. Native DisplayPort Alt-Mode over USB-C is physically impossible on both stock Android and mainline Linux. Use VNC/RDP/WayVNC (over Wi-Fi 6 or USB ECM) or a USB 2.0 DisplayLink adapter for external display output.

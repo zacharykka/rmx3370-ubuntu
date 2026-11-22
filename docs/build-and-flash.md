@@ -92,10 +92,10 @@ make -j$(nproc) -C kernel O="$OUT" ARCH=arm64 LOCALVERSION="" \
 
 ### 4.2 Build `.deb` Packages
 ```bash
-# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra12_1_arm64.deb
+# Kernel + modules + DTB package -> out/debs/linux-image-7.4.0-rc3-bitra13_1_arm64.deb
 OUT="$PWD/out/server-build" bash tools/pkg_kernel_deb.sh
 
-# Device integration package -> out/debs/bitra-device-support_1.1_arm64.deb
+# Device integration package -> out/debs/bitra-device-support_1.2_arm64.deb
 # Includes: USB CDC-ECM service, key-only SSH config, NetworkManager usb0 unmanaged rule,
 #           compact initramfs-tools config (MODULES=list), Wi-Fi MAC udev rule,
 #           24/7 anti-swelling charge-limit systemd timer, 24/7 no-suspend policy
@@ -111,12 +111,12 @@ bash tools/pkg_device_support_deb.sh 1.1
 # installs server packages + our two .debs via qemu-aarch64-static chroot,
 # generates compact initrd (< 8 MiB), and outputs:
 #   out/ubuntu-24.04.5-bitra-server-arm64.tar.gz
-#   out/initrd.img-7.4.0-rc3-bitra12
+#   out/initrd.img-7.4.0-rc3-bitra13
 bash tools/build_ubuntu_rootfs.sh
 
 # Injects DTBO sink symbols, verifies offline fdtoverlay apply, checks initrd <= 14 MiB,
 # builds Android boot_v2 image, and appends 96 MiB AVB hash footer:
-#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra12.img
+#   out/boot-bitra-ubuntu-7.4.0-rc3-bitra13.img
 OUT="$PWD/out/server-build" bash tools/make_ubuntu_boot.sh
 ```
 
@@ -173,12 +173,12 @@ chroot /mnt /usr/bin/python3 -c 'import ctypes; ctypes.CDLL("libc.so.6").syscall
 
 ### 7.1 Always RAM-Test Before Flashing
 ```bash
-fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra12.img
+fastboot -s <SERIAL> boot boot-bitra-ubuntu-7.4.0-rc3-bitra13.img
 ```
 Wait ~20–25 seconds, then SSH in:
 ```bash
 ssh ubuntu@192.168.2.15
-uname -a                    # 7.4.0-rc3-bitra12 aarch64
+uname -a                    # 7.4.0-rc3-bitra13 aarch64
 systemctl is-system-running # running (0 failed units)
 df -h /                     # /dev/sda11 ~222G
 ```
@@ -282,11 +282,38 @@ sudo chmod 644 /lib/firmware/qca/ht* /lib/firmware/qcom/sm8250/realme/bitra/adsp
 sudo usermod -aG audio,bluetooth ubuntu
 sudo systemctl enable pd-mapper.service bluetooth.service bitra-bt-addr.service
 
-# 4. Verify after booting bitra12 + bitra-device-support 1.1:
+# 4. Verify after booting bitra13 + bitra-device-support 1.2:
 hciconfig -a
 bluetoothctl show
 wpctl status    # Shows Stereo Speakers (Dual TFA9874) + Internal Microphones (WCD9380)
 ```
+
+
+### 7.2e Linear Haptics (`AW8697`) & SLPI Sensors (`hexagonrpcd` + `libssc` + `iio-sensor-proxy`)
+
+1. **Linear Haptics (`AW8697`)**: Works out-of-the-box on `7.4.0-rc3-bitra13` + `bitra-device-support 1.2`. Install `feedbackd` (and optionally `joystick` for `fftest`) so Phosh/apps trigger tactile feedback via `FEEDBACKD_TYPE=vibra`.
+2. **SLPI Firmware & Sensor Configs**:
+   - Generic model files (included in `firmware-rmx3370-stock` Release):
+     - `/lib/firmware/qcom/sm8250/realme/bitra/slpi.{mdt,b00..b21}`, `slpir.jsn`, `slpius.jsn`
+     - `/usr/share/qcom/sm8250/realme/bitra/sensors/{config/*,sns_reg.conf}`
+     - `/usr/share/qcom/sm8250/realme/bitra/vendor/lib/rfsa/adsp/libsns_*.so` (with symlink `dsp/sdsp -> /vendor/lib/rfsa/adsp`)
+   - **Per-device factory calibration (extract read-only from YOUR OWN phone, never share!)**:
+     ```bash
+     sudo mkdir -p /mnt/persist_ro /var/lib/bitra/persist-sensors
+     sudo mount -o ro /dev/disk/by-partlabel/persist /mnt/persist_ro
+     sudo cp -a /mnt/persist_ro/sensors/. /var/lib/bitra/persist-sensors/
+     sudo umount /mnt/persist_ro
+     sudo ln -sfn /var/lib/bitra/persist-sensors/registry/registry /usr/share/qcom/sm8250/realme/bitra/sensors/registry
+     ```
+   - **Important**: Do **not** create `/usr/share/qcom/sm8250/realme/bitra/socinfo/` — otherwise SLPI tries to rewrite `temp.json` into the read-only registry and stalls (see Pitfall 39).
+3. **Userspace sensor stack**: Build & install `hexagonrpc` (`hexagonrpcd`), `libssc` (`https://codeberg.org/DylanVanAssche/libssc`), and `iio-sensor-proxy` with `-Dssc-support=enabled`. `bitra-device-support 1.2` ships `hexagonrpcd-sdsp.service`, `81-bitra-ssc-sensors.rules`, and the `iio-sensor-proxy` ordering drop-in.
+4. **Verify**:
+   ```bash
+   sudo ssccli --sensor accelerometer --timeout 2
+   sudo ssccli --sensor magnetometer --timeout 2
+   sudo ssccli --sensor light --timeout 2
+   sudo timeout 5 monitor-sensor
+   ```
 
 ### 7.3 Flash `boot` Partition & Verify Cold Boot
 ```bash
@@ -294,7 +321,7 @@ wpctl status    # Shows Stereo Speakers (Dual TFA9874) + Internal Microphones (W
 sudo reboot bootloader
 
 # On your host:
-fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra12.img
+fastboot -s <SERIAL> flash boot boot-bitra-ubuntu-7.4.0-rc3-bitra13.img
 fastboot -s <SERIAL> reboot
 ```
 After ~25 seconds, cold-boot SSH (`ssh ubuntu@192.168.2.15`) is live and `bitra-oled-blank.service` puts the OLED panel into true DPMS power-off (0 burn-in while headless).

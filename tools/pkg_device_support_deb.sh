@@ -144,6 +144,8 @@ if [ ! -d "$G" ]; then
   echo "RMX3370 Ubuntu Server" > "$G/strings/0x409/product"
   mkdir -p "$G/configs/c.1/strings/0x409"
   echo "ecm" > "$G/configs/c.1/strings/0x409/configuration"
+  # 0xe0 = bus+self-powered + remote-wakeup capable (prevents dwc3 dropping DHCP/ARP on macOS USB suspend)
+  echo 0xe0 > "$G/configs/c.1/bmAttributes"
   echo 500 > "$G/configs/c.1/MaxPower"
   mkdir -p "$G/functions/ecm.usb0"
   echo "02:11:22:33:44:55" > "$G/functions/ecm.usb0/dev_addr"
@@ -168,7 +170,7 @@ ip addr replace 192.168.2.15/24 dev "$IFACE"
 
 if command -v dnsmasq >/dev/null 2>&1; then
   pkill -f "dnsmasq.*bitra-usb" 2>/dev/null || true
-  dnsmasq --interface="$IFACE" --bind-interfaces --port=0 \
+  dnsmasq --interface="$IFACE" --bind-dynamic --port=0 --dhcp-authoritative \
     --dhcp-range=192.168.2.20,192.168.2.30,255.255.255.0,12h \
     --dhcp-option=3 --dhcp-option=6 \
     --dhcp-leasefile=/run/bitra-usb-dhcp.leases \
@@ -1378,7 +1380,33 @@ FB_BLANK="/sys/class/graphics/fb0/blank"
 
 oled_off() {
   [ -w "$BL_DIR/brightness" ] && echo 0 > "$BL_DIR/brightness" 2>/dev/null || true
-  [ -w "$FB_BLANK" ] && echo 1 > "$FB_BLANK" 2>/dev/null || true
+  if [ -w "$FB_BLANK" ]; then
+    echo 4 > "$FB_BLANK" 2>/dev/null || true
+  elif [ -c /dev/dri/card0 ] && command -v python3 >/dev/null 2>&1; then
+    python3 - << "DRMPY" 2>/dev/null || true
+import array, ctypes, fcntl, os, struct
+fd = os.open("/dev/dri/card0", os.O_RDWR)
+try:
+    # DRM_IOCTL_MODE_GETRESOURCES = 0xc04064a0
+    res = bytearray(64)
+    fcntl.ioctl(fd, 0xc04064a0, res)
+    _, n_crtcs, _, _ = struct.unpack_from("=IIII", res, 32)
+    if n_crtcs > 0:
+        crtcs = (ctypes.c_uint32 * n_crtcs)()
+        struct.pack_into("=QQQQIIII", res, 0, 0, ctypes.addressof(crtcs), 0, 0, 0, n_crtcs, 0, 0)
+        fcntl.ioctl(fd, 0xc04064a0, res)
+        # DRM_IOCTL_MODE_SETCRTC = 0xc06864a2 (fb_id=0, count_connectors=0 disables CRTC)
+        for cid in crtcs:
+            req = bytearray(104)
+            struct.pack_into("=QII", req, 0, 0, 0, cid)
+            try:
+                fcntl.ioctl(fd, 0xc06864a2, req)
+            except OSError:
+                pass
+finally:
+    os.close(fd)
+DRMPY
+  fi
 }
 
 oled_on() {
@@ -1393,8 +1421,9 @@ case "${1:-status}" in
       echo "Phosh is not installed. Install with: sudo apt-get install phosh phoc phosh-osk-stub"
       exit 1
     fi
-    oled_on 800
     systemctl start phosh.service
+    sleep 1
+    oled_on 600
     echo "[bitra-desktop] Phosh started on DSI-1."
     ;;
   stop)
@@ -1440,12 +1469,12 @@ chmod 755 "$STAGE/usr/sbin/bitra-desktop"
 cat > "$STAGE/etc/systemd/system/bitra-oled-blank.service" << "OLEDBLANK"
 [Unit]
 Description=RMX3370 Headless OLED True-DPMS Power-Off (Anti-Burn-In)
-After=systemd-udev-settle.service local-fs.target
+After=systemd-udev-settle.service local-fs.target getty@tty1.service
 ConditionPathExists=!/run/bitra-keep-oled-on
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash -c 'for i in $(seq 1 20); do [ -e /sys/class/graphics/fb0/blank ] && break; sleep 0.5; done; if ! systemctl is-active --quiet phosh.service; then /usr/sbin/bitra-desktop blank; fi'
+ExecStart=/bin/bash -c 'for i in $(seq 1 20); do [ -e /sys/class/graphics/fb0/blank ] && break; sleep 0.5; done; if ! systemctl is-active --quiet phosh.service; then sleep 2; /usr/sbin/bitra-desktop blank; fi'
 
 [Install]
 WantedBy=multi-user.target
@@ -1471,6 +1500,49 @@ table.insert(alsa_monitor.rules, {
 })
 WPEOF
 
+# 13a-udev. udev rule so iio-sensor-proxy enables all Qualcomm SSC sensors on /dev/fastrpc-sdsp
+mkdir -p "$STAGE/etc/udev/rules.d"
+cat > "$STAGE/etc/udev/rules.d/81-bitra-ssc-sensors.rules" << 'UDEVEOF'
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp*", ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-accel ssc-light ssc-proximity ssc-compass"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="aw8697-haptics", TAG+="uaccess", ENV{FEEDBACKD_TYPE}="vibra"
+UDEVEOF
+
+# 13a-slpi. HexagonRPC reverse-tunnel daemon for SLPI sensors (/dev/fastrpc-sdsp)
+cat > "$STAGE/etc/systemd/system/hexagonrpcd-sdsp.service" << 'HEXEOF'
+[Unit]
+Description=Qualcomm SLPI/SDSP HexagonRPC Sensor Daemon
+ConditionPathExists=/usr/bin/hexagonrpcd
+After=pd-mapper.service local-fs.target
+Wants=pd-mapper.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -c /dev/fastrpc-sdsp ] && exit 0; sleep 0.5; done; exit 0'
+ExecStart=/usr/bin/hexagonrpcd -f /dev/fastrpc-sdsp -d sdsp -s -R /usr/share/qcom/sm8250/realme/bitra
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+HEXEOF
+
+mkdir -p "$STAGE/etc/systemd/system/iio-sensor-proxy.service.d"
+cat > "$STAGE/etc/systemd/system/iio-sensor-proxy.service.d/after-hexagonrpcd.conf" << 'IIOEOF'
+[Unit]
+After=hexagonrpcd-sdsp.service
+Wants=hexagonrpcd-sdsp.service
+
+[Service]
+ExecStartPre=/bin/sleep 8
+IIOEOF
+
+# 13a-2. Disable legacy fbdev on headless boot (keeps OLED completely off from boot; Wayland/Phosh uses DRM/KMS directly)
+mkdir -p "$STAGE/etc/modprobe.d"
+cat > "$STAGE/etc/modprobe.d/bitra-msm.conf" << "MSMEOF"
+options msm fbdev=0
+options drm_kms_helper fbdev_emulation=0
+MSMEOF
+
 # 13b. Persistent USB CDC-ECM auto-recovery watchdog (handles macOS sleep/wake, replug & tcpm TOGGLING)
 cat > "$STAGE/usr/sbin/bitra-usb-watch" << "USBWSH"
 #!/bin/bash
@@ -1481,12 +1553,19 @@ ROLE="/sys/class/usb_role/a600000.usb-role-switch/role"
 ONLINE="/sys/class/power_supply/mp2650-charger/online"
 GADGET_UDC="/sys/kernel/config/usb_gadget/g1/UDC"
 
+BAD_COUNT=0
 while true; do
   sleep 4
-  [ -r "$ONLINE" ] && [ "$(cat "$ONLINE" 2>/dev/null || echo 0)" = "1" ] || continue
-  [ -r "$ROLE" ] && [ "$(cat "$ROLE" 2>/dev/null || echo device)" = "host" ] && continue
+  [ -r "$ONLINE" ] && [ "$(cat "$ONLINE" 2>/dev/null || echo 0)" = "1" ] || { BAD_COUNT=0; continue; }
+  [ -r "$ROLE" ] && [ "$(cat "$ROLE" 2>/dev/null || echo device)" = "host" ] && { BAD_COUNT=0; continue; }
   STATE="$(cat "$UDC/state" 2>/dev/null || echo unknown)"
-  if [ "$STATE" != "configured" ]; then
+  if [ "$STATE" = "configured" ] || [ "$STATE" = "suspended" ]; then
+    BAD_COUNT=0
+    continue
+  fi
+  BAD_COUNT=$((BAD_COUNT + 1))
+  if [ "$BAD_COUNT" -ge 2 ]; then
+    BAD_COUNT=0
     logger -t bitra-usb-watch "USB gadget state=$STATE while VBUS online; cycling soft_connect"
     [ -w "$ROLE" ] && echo device > "$ROLE" 2>/dev/null || true
     if [ -r "$GADGET_UDC" ] && [ -z "$(cat "$GADGET_UDC" 2>/dev/null || true)" ]; then
@@ -1499,6 +1578,15 @@ while true; do
     fi
     sleep 2
     ip link set usb0 up 2>/dev/null || true
+    ip addr replace 192.168.2.15/24 dev usb0 2>/dev/null || true
+    if command -v dnsmasq >/dev/null 2>&1; then
+      pkill -f "dnsmasq.*bitra-usb" 2>/dev/null || true
+      dnsmasq --interface=usb0 --bind-dynamic --port=0 --dhcp-authoritative \
+        --dhcp-range=192.168.2.20,192.168.2.30,255.255.255.0,12h \
+        --dhcp-option=3 --dhcp-option=6 \
+        --dhcp-leasefile=/run/bitra-usb-dhcp.leases \
+        --pid-file=/run/bitra-usb-dnsmasq.pid 2>/dev/null || true
+    fi
     # Back off 10s after recovery attempt so we do not spam if plugged into a dumb charger
     sleep 10
   fi

@@ -1,0 +1,1015 @@
+From 907c508e52d83e584d9c9c35450768b01c252fc1 Mon Sep 17 00:00:00 2001
+From: ut-bitra <ut-bitra@localhost>
+Date: Sun, 22 Nov 2026 22:26:07 +0800
+Subject: [PATCH] arm64: dts: qcom: bitra: enable AW8697 haptics, SLPI sensors,
+ USB ECM fix & OLED power-off
+
+Enable Awinic AW8697 X-axis LRA linear haptics (i2c11@0x5a, 170 Hz, EV_FF),
+Qualcomm SLPI sensor hub with OPLUS SMEM_SENSOR (item 130, 4768 bytes)
+initializer for all 6 onboard SSC sensors (accel, gyro, mag, compass,
+light, proximity), fix USB CDC-ECM TX deadlock on suspend/reconnect in
+u_ether.c + DWC3 USB2 LPM disable quirks, and model panel vout GPIO 125
+as vreg_panel_vout with OPLUS POST_ON_BACKLIGHT delayed DISPON.
+---
+ .../boot/dts/qcom/sm8250-realme-bitra.dts     |  56 ++-
+ .../gpu/drm/panel/panel-samsung-ams662zs01.c  |  64 ++-
+ drivers/input/misc/Kconfig                    |  12 +
+ drivers/input/misc/Makefile                   |   1 +
+ drivers/input/misc/aw8697.c                   | 399 ++++++++++++++++++
+ drivers/soc/qcom/Kconfig                      |   7 +
+ drivers/soc/qcom/Makefile                     |   1 +
+ drivers/soc/qcom/oplus_bitra_sensor_smem.c    | 226 ++++++++++
+ drivers/usb/gadget/function/u_ether.c         |   9 +-
+ 9 files changed, 753 insertions(+), 22 deletions(-)
+ create mode 100644 drivers/input/misc/aw8697.c
+ create mode 100644 drivers/soc/qcom/oplus_bitra_sensor_smem.c
+
+diff --git a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+index 483c35aa4..3b768c433 100644
+--- a/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
++++ b/arch/arm64/boot/dts/qcom/sm8250-realme-bitra.dts
+@@ -74,6 +74,13 @@ chosen {
+ 		bootargs = "";
+ 	};
+ 
++	vreg_panel_vout: regulator-panel-vout {
++		compatible = "regulator-fixed";
++		regulator-name = "vreg_panel_vout";
++		gpio = <&tlmm 125 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
+ 	/*
+ 	 * Disable PSCI deep-sleep CPU/cluster idle states for now (stock bootargs
+ 	 * also sets lpm_levels.sleep_disabled=1; tracked in docs/tech-debt.md).
+@@ -519,6 +526,31 @@ vreg_l2c_1p15: ldo2 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
++		/* SLPI / SSC sensor power rails (vdd2=l4c, vddio=l8c, vdd=l10c) */
++		vreg_l4c_1p8: ldo4 {
++			regulator-name = "vreg_l4c_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <2800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-always-on;
++		};
++
++		vreg_l8c_1p8: ldo8 {
++			regulator-name = "vreg_l8c_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-always-on;
++		};
++
++		vreg_l10c_3p0: ldo10 {
++			regulator-name = "vreg_l10c_3p0";
++			regulator-min-microvolt = <3000000>;
++			regulator-max-microvolt = <3312000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++			regulator-always-on;
++		};
++
+ 		vreg_l11c_3p0: ldo11 {
+ 			regulator-name = "vreg_l11c_3p0";
+ 			regulator-min-microvolt = <2832000>;
+@@ -572,6 +604,9 @@ &usb_1_dwc3 {
+ 	maximum-speed = "high-speed";
+ 	phys = <&usb_1_hsphy>;
+ 	phy-names = "usb2-phy";
++	snps,dis_u2_susphy_quirk;
++	snps,dis_enblslpm_quirk;
++	snps,usb2-gadget-lpm-disable;
+ 	usb-role-switch;
+ 	role-switch-default-mode = "peripheral";
+ };
+@@ -800,9 +835,9 @@ display_panel: panel@0 {
+ 		vddio-supply = <&vreg_l14a_1p8>;
+ 		vci-supply = <&vreg_l13a_3p0>;
+ 		vddr-supply = <&vreg_l2c_1p15>;
++		vout-supply = <&vreg_panel_vout>;
+ 
+ 		reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
+-		vout-gpios = <&tlmm 125 GPIO_ACTIVE_HIGH>;
+ 
+ 		pinctrl-0 = <&sde_dsi_active &sde_te_active>;
+ 		pinctrl-names = "default";
+@@ -1100,3 +1135,22 @@ platform {
+ 		};
+ 	};
+ };
++
++/* Sensors Low Power Island (SLPI) remoteproc for SSC sensors */
++&slpi {
++	firmware-name = "qcom/sm8250/realme/bitra/slpi.mdt";
++	status = "okay";
++};
++
++/* Awinic AW8697 X-axis 0815 LRA haptic motor on QUP1 I2C11 (0xa8c000) */
++&i2c11 {
++	clock-frequency = <400000>;
++	status = "okay";
++
++	haptics@5a {
++		compatible = "awinic,aw8697";
++		reg = <0x5a>;
++		reset-gpios = <&tlmm 72 GPIO_ACTIVE_HIGH>;
++		awinic,f0-preset = <1700>;
++	};
++};
+diff --git a/drivers/gpu/drm/panel/panel-samsung-ams662zs01.c b/drivers/gpu/drm/panel/panel-samsung-ams662zs01.c
+index 7cb2bf5e9..620f0a3cf 100644
+--- a/drivers/gpu/drm/panel/panel-samsung-ams662zs01.c
++++ b/drivers/gpu/drm/panel/panel-samsung-ams662zs01.c
+@@ -25,14 +25,15 @@ struct ams662zs01 {
+ 	struct mipi_dsi_device *dsi;
+ 	struct drm_dsc_config dsc;
+ 	struct gpio_desc *reset_gpio;
+-	struct gpio_desc *vout_gpio;
+ 	struct regulator_bulk_data *supplies;
++	bool need_disp_on;
+ };
+ 
+ static const struct regulator_bulk_data ams662zs01_supplies[] = {
+ 	{ .supply = "vddio" },
+ 	{ .supply = "vci" },
+ 	{ .supply = "vddr" },
++	{ .supply = "vout" },
+ };
+ 
+ static inline struct ams662zs01 *to_ams662zs01(struct drm_panel *panel)
+@@ -43,7 +44,7 @@ static inline struct ams662zs01 *to_ams662zs01(struct drm_panel *panel)
+ static void ams662zs01_reset(struct ams662zs01 *ctx)
+ {
+ 	/* Stock sequence: 1 (10ms) -> 0 (10ms) -> 1 (10ms); GPIO is ACTIVE_LOW */
+-	gpiod_set_value_cansleep(ctx->reset_gpio, 0);
++	gpiod_direction_output(ctx->reset_gpio, 0);
+ 	usleep_range(10000, 11000);
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+ 	usleep_range(10000, 11000);
+@@ -98,8 +99,8 @@ static int ams662zs01_on(struct ams662zs01 *ctx)
+ 
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_CONTROL_DISPLAY, 0x20);
+ 	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_WRITE_POWER_SAVE, 0x00);
+-	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_BRIGHTNESS, 0x02, 0x00);
+-	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
++	/* Keep display dark until .enable() turns it on after the first frame is in GRAM */
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_BRIGHTNESS, 0x00, 0x00);
+ 
+ 	return dsi_ctx.accum_err;
+ }
+@@ -131,17 +132,12 @@ static int ams662zs01_prepare(struct drm_panel *panel)
+ 	if (ret < 0)
+ 		return ret;
+ 
+-	if (ctx->vout_gpio)
+-		gpiod_set_value_cansleep(ctx->vout_gpio, 1);
+-
+ 	usleep_range(10000, 12000);
+ 	ams662zs01_reset(ctx);
+ 
+ 	ret = ams662zs01_on(ctx);
+ 	if (ret < 0) {
+ 		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+-		if (ctx->vout_gpio)
+-			gpiod_set_value_cansleep(ctx->vout_gpio, 0);
+ 		regulator_bulk_disable(ARRAY_SIZE(ams662zs01_supplies), ctx->supplies);
+ 		return ret;
+ 	}
+@@ -156,8 +152,6 @@ static int ams662zs01_unprepare(struct drm_panel *panel)
+ 	ams662zs01_off(ctx);
+ 
+ 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+-	if (ctx->vout_gpio)
+-		gpiod_set_value_cansleep(ctx->vout_gpio, 0);
+ 
+ 	regulator_bulk_disable(ARRAY_SIZE(ams662zs01_supplies), ctx->supplies);
+ 
+@@ -185,8 +179,37 @@ static int ams662zs01_get_modes(struct drm_panel *panel,
+ 	return drm_connector_helper_get_modes_fixed(connector, &ams662zs01_mode_60hz);
+ }
+ 
++static int ams662zs01_enable(struct drm_panel *panel)
++{
++	struct ams662zs01 *ctx = to_ams662zs01(panel);
++
++	/*
++	 * Match stock OPLUS DSI_CMD_POST_ON_BACKLIGHT: keep DISPOFF until the
++	 * first non-zero backlight update after a real frame has been committed.
++	 */
++	ctx->need_disp_on = true;
++	return 0;
++}
++
++static int ams662zs01_disable(struct drm_panel *panel)
++{
++	struct ams662zs01 *ctx = to_ams662zs01(panel);
++	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
++
++	ctx->need_disp_on = true;
++	ctx->dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
++	mipi_dsi_dcs_write_seq_multi(&dsi_ctx, MIPI_DCS_SET_DISPLAY_BRIGHTNESS, 0x00, 0x00);
++	mipi_dsi_dcs_set_display_off_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 16);
++	ctx->dsi->mode_flags |= MIPI_DSI_MODE_LPM;
++
++	return dsi_ctx.accum_err;
++}
++
+ static const struct drm_panel_funcs ams662zs01_panel_funcs = {
+ 	.prepare = ams662zs01_prepare,
++	.enable = ams662zs01_enable,
++	.disable = ams662zs01_disable,
+ 	.unprepare = ams662zs01_unprepare,
+ 	.get_modes = ams662zs01_get_modes,
+ };
+@@ -194,12 +217,22 @@ static const struct drm_panel_funcs ams662zs01_panel_funcs = {
+ static int ams662zs01_bl_update_status(struct backlight_device *bl)
+ {
+ 	struct mipi_dsi_device *dsi = bl_get_data(bl);
++	struct ams662zs01 *ctx = mipi_dsi_get_drvdata(dsi);
+ 	u16 brightness = backlight_get_brightness(bl);
+ 	u8 payload[2] = { (brightness >> 8) & 0x0f, brightness & 0xff };
+ 	int ret;
+ 
+ 	dsi->mode_flags &= ~MIPI_DSI_MODE_LPM;
+ 	ret = mipi_dsi_dcs_write(dsi, MIPI_DCS_SET_DISPLAY_BRIGHTNESS, payload, sizeof(payload));
++	if (ret >= 0 && brightness > 0 && ctx && ctx->need_disp_on) {
++		usleep_range(20000, 22000);
++		ret = mipi_dsi_dcs_set_display_on(dsi);
++		if (ret >= 0)
++			ctx->need_disp_on = false;
++	} else if (ret >= 0 && brightness == 0 && ctx && !ctx->need_disp_on) {
++		ret = mipi_dsi_dcs_set_display_off(dsi);
++		ctx->need_disp_on = true;
++	}
+ 	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+ 
+ 	return ret < 0 ? ret : 0;
+@@ -213,7 +246,7 @@ static struct backlight_device *ams662zs01_create_backlight(struct mipi_dsi_devi
+ {
+ 	const struct backlight_properties props = {
+ 		.type = BACKLIGHT_RAW,
+-		.brightness = 512,
++		.brightness = 0,
+ 		.max_brightness = 2047,
+ 	};
+ 
+@@ -238,16 +271,11 @@ static int ams662zs01_probe(struct mipi_dsi_device *dsi)
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret, "Failed to get regulators\n");
+ 
+-	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
++	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_ASIS);
+ 	if (IS_ERR(ctx->reset_gpio))
+ 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
+ 				     "Failed to get reset-gpios\n");
+ 
+-	ctx->vout_gpio = devm_gpiod_get_optional(dev, "vout", GPIOD_OUT_HIGH);
+-	if (IS_ERR(ctx->vout_gpio))
+-		return dev_err_probe(dev, PTR_ERR(ctx->vout_gpio),
+-				     "Failed to get vout-gpios\n");
+-
+ 	ctx->dsi = dsi;
+ 	mipi_dsi_set_drvdata(dsi, ctx);
+ 
+diff --git a/drivers/input/misc/Kconfig b/drivers/input/misc/Kconfig
+index 169768e3d..52ff3661c 100644
+--- a/drivers/input/misc/Kconfig
++++ b/drivers/input/misc/Kconfig
+@@ -126,6 +126,18 @@ config INPUT_ATMEL_CAPTOUCH
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called atmel_captouch.
+ 
++config INPUT_AW8697
++	tristate "Awinic AW8697 LRA Haptic Driver Support"
++	depends on I2C && INPUT
++	select INPUT_FF_MEMLESS
++	select REGMAP_I2C
++	help
++	  Say Y here if you have an Awinic AW8697 linear resonant actuator
++	  haptic controller.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called aw8697.
++
+ config INPUT_AW86927
+ 	tristate "Awinic AW86927 Haptic Driver Support"
+ 	depends on I2C && INPUT
+diff --git a/drivers/input/misc/Makefile b/drivers/input/misc/Makefile
+index 1339619f0..171d3ff1f 100644
+--- a/drivers/input/misc/Makefile
++++ b/drivers/input/misc/Makefile
+@@ -23,6 +23,7 @@ obj-$(CONFIG_INPUT_ATC260X_ONKEY)	+= atc260x-onkey.o
+ obj-$(CONFIG_INPUT_ATI_REMOTE2)		+= ati_remote2.o
+ obj-$(CONFIG_INPUT_ATLAS_BTNS)		+= atlas_btns.o
+ obj-$(CONFIG_INPUT_ATMEL_CAPTOUCH)	+= atmel_captouch.o
++obj-$(CONFIG_INPUT_AW8697)		+= aw8697.o
+ obj-$(CONFIG_INPUT_AW86927)		+= aw86927.o
+ obj-$(CONFIG_INPUT_BBNSM_PWRKEY)	+= nxp-bbnsm-pwrkey.o
+ obj-$(CONFIG_INPUT_BMA150)		+= bma150.o
+diff --git a/drivers/input/misc/aw8697.c b/drivers/input/misc/aw8697.c
+new file mode 100644
+index 000000000..d60bba271
+--- /dev/null
++++ b/drivers/input/misc/aw8697.c
+@@ -0,0 +1,399 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Awinic AW8697 Linear Resonant Actuator (LRA) Haptic Driver
++ *
++ * Exposes standard Linux Force-Feedback (EV_FF / FF_RUMBLE) using the chip's
++ * closed-loop continuous sine-wave LRA drive mode with auto-braking.
++ */
++
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/input.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define AW8697_REG_ID			0x00
++#define  AW8697_CHIP_ID			0x97
++
++#define AW8697_REG_SYSINT		0x02
++#define AW8697_REG_SYSINTM		0x03
++#define  AW8697_SYSINTM_UVLO_MASK	BIT(5)
++#define  AW8697_SYSINTM_UVLO_OFF	BIT(5)
++#define  AW8697_SYSINTM_UVLO_EN		0
++
++#define AW8697_REG_SYSCTRL		0x04
++#define  AW8697_SYSCTRL_PLAY_MODE_MASK	GENMASK(3, 2)
++#define  AW8697_SYSCTRL_PLAY_MODE_CONT	(2 << 2)
++#define  AW8697_SYSCTRL_BST_MODE_MASK	BIT(1)
++#define  AW8697_SYSCTRL_BST_BYPASS	0
++#define  AW8697_SYSCTRL_WORK_MODE_MASK	BIT(0)
++#define  AW8697_SYSCTRL_STANDBY		BIT(0)
++#define  AW8697_SYSCTRL_ACTIVE		0
++
++#define AW8697_REG_GO			0x05
++#define  AW8697_GO_ENABLE		BIT(0)
++
++#define AW8697_REG_DATCTRL		0x2b
++#define  AW8697_DATCTRL_FC_MASK		GENMASK(7, 6)
++#define  AW8697_DATCTRL_FC_1000HZ	(3 << 6)
++#define  AW8697_DATCTRL_LPF_EN		BIT(5)
++
++#define AW8697_REG_PWMDBG		0x2e
++#define  AW8697_PWMDBG_PWM_MASK		GENMASK(6, 5)
++#define  AW8697_PWMDBG_PWM_24K		(2 << 5)
++
++#define AW8697_REG_BSTDBG1		0x31
++#define AW8697_REG_BSTDBG2		0x32
++#define AW8697_REG_BSTDBG3		0x33
++#define AW8697_REG_BSTCFG		0x34
++#define  AW8697_BSTCFG_PEAKCUR_MASK	GENMASK(2, 0)
++#define  AW8697_BSTCFG_PEAKCUR_3P5A	5
++
++#define AW8697_REG_ANADBG		0x35
++#define  AW8697_ANADBG_IOC_MASK		GENMASK(3, 2)
++#define  AW8697_ANADBG_IOC_4P65A	(3 << 2)
++
++#define AW8697_REG_PRLVL		0x3e
++#define AW8697_REG_PRTIME		0x3f
++
++#define AW8697_REG_GLB_STATE		0x46
++#define AW8697_REG_BST_AUTO		0x47
++#define  AW8697_BST_AUTO_RAM_MASK	BIT(0)
++
++#define AW8697_REG_CONT_CTRL		0x48
++#define  AW8697_CONT_ZC_DETEC_EN	BIT(7)
++#define  AW8697_CONT_WAIT_1PERIOD	0
++#define  AW8697_CONT_BY_GO_SIGNAL	0
++#define  AW8697_CONT_CLOSE_PLAYBACK	BIT(3)
++#define  AW8697_CONT_F0_DETECT_DIS	0
++#define  AW8697_CONT_O2C_DIS		0
++#define  AW8697_CONT_AUTO_BRK_EN	BIT(0)
++
++#define AW8697_REG_F_PRE_H		0x49
++#define AW8697_REG_F_PRE_L		0x4a
++#define AW8697_REG_TD_H			0x4b
++#define AW8697_REG_TD_L			0x4c
++#define AW8697_REG_TSET			0x4d
++#define AW8697_REG_R_SPARE		0x5d
++#define AW8697_REG_ADCTEST		0x66
++#define  AW8697_ADCTEST_VBAT_HW_COMP	BIT(6)
++
++#define AW8697_REG_ZC_THRSH_H		0x72
++#define AW8697_REG_ZC_THRSH_L		0x73
++#define AW8697_REG_BEMF_VTHH_H		0x74
++#define AW8697_REG_BEMF_VTHH_L		0x75
++#define AW8697_REG_BEMF_VTHL_H		0x76
++#define AW8697_REG_BEMF_VTHL_L		0x77
++#define AW8697_REG_BEMF_NUM		0x78
++#define  AW8697_BEMF_NUM_BRK_MASK	GENMASK(3, 0)
++#define AW8697_REG_TIME_NZC		0x7a
++#define AW8697_REG_DRV_LVL		0x7b
++#define AW8697_REG_DRV_LVL_OV		0x7c
++
++/* Default 0815 X-axis LRA parameters (170.0 Hz) */
++#define AW8697_F0_COEFF			260
++#define AW8697_DEFAULT_F0_PRE		1700
++#define AW8697_DEFAULT_CONT_TD		0x009a
++#define AW8697_DEFAULT_ZC_THR		0x0ff1
++#define AW8697_DEFAULT_NUM_BRK		3
++#define AW8697_DEFAULT_DRV_LVL_MAX	105
++#define AW8697_DEFAULT_DRV_LVL_MIN	24
++#define AW8697_DEFAULT_DRV_LVL_OV	125
++
++struct aw8697_data {
++	struct device *dev;
++	struct regmap *regmap;
++	struct gpio_desc *reset_gpio;
++	struct input_dev *input_dev;
++	struct work_struct play_work;
++	struct mutex lock;
++
++	u32 f0_pre;
++	u32 cont_td;
++	u32 cont_zc_thr;
++	u32 cont_num_brk;
++	u32 drv_lvl_max;
++	u32 drv_lvl_ov;
++
++	u16 magnitude;
++	bool running;
++};
++
++static const struct regmap_config aw8697_regmap_cfg = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = 0x7f,
++	.cache_type = REGCACHE_NONE,
++};
++
++static int aw8697_hw_reset(struct aw8697_data *aw)
++{
++	if (!aw->reset_gpio)
++		return 0;
++
++	gpiod_set_value_cansleep(aw->reset_gpio, 0);
++	usleep_range(1000, 2000);
++	gpiod_set_value_cansleep(aw->reset_gpio, 1);
++	usleep_range(3500, 4500);
++	return 0;
++}
++
++static void aw8697_stop_locked(struct aw8697_data *aw)
++{
++	unsigned int val = 0;
++	int i;
++
++	regmap_update_bits(aw->regmap, AW8697_REG_GO, AW8697_GO_ENABLE, 0);
++	for (i = 0; i < 40; i++) {
++		if (regmap_read(aw->regmap, AW8697_REG_GLB_STATE, &val))
++			break;
++		if ((val & 0x0f) == 0)
++			break;
++		usleep_range(2000, 2500);
++	}
++	regmap_update_bits(aw->regmap, AW8697_REG_SYSINTM,
++			   AW8697_SYSINTM_UVLO_MASK, AW8697_SYSINTM_UVLO_OFF);
++	regmap_update_bits(aw->regmap, AW8697_REG_SYSCTRL,
++			   AW8697_SYSCTRL_WORK_MODE_MASK, AW8697_SYSCTRL_STANDBY);
++	aw->running = false;
++}
++
++static int aw8697_init_chip(struct aw8697_data *aw)
++{
++	unsigned int reg = 0;
++	u32 f0_reg;
++
++	regmap_update_bits(aw->regmap, AW8697_REG_SYSINTM,
++			   AW8697_SYSINTM_UVLO_MASK, AW8697_SYSINTM_UVLO_OFF);
++	regmap_update_bits(aw->regmap, AW8697_REG_SYSCTRL,
++			   AW8697_SYSCTRL_WORK_MODE_MASK, AW8697_SYSCTRL_STANDBY);
++
++	regmap_update_bits(aw->regmap, AW8697_REG_PWMDBG,
++			   AW8697_PWMDBG_PWM_MASK, AW8697_PWMDBG_PWM_24K);
++
++	regmap_write(aw->regmap, AW8697_REG_BSTDBG1, 0x30);
++	regmap_write(aw->regmap, AW8697_REG_BSTDBG2, 0xeb);
++	regmap_write(aw->regmap, AW8697_REG_BSTDBG3, 0xd4);
++	regmap_write(aw->regmap, AW8697_REG_TSET, 0x12);
++	regmap_write(aw->regmap, AW8697_REG_R_SPARE, 0x68);
++
++	regmap_update_bits(aw->regmap, AW8697_REG_ANADBG,
++			   AW8697_ANADBG_IOC_MASK, AW8697_ANADBG_IOC_4P65A);
++	regmap_update_bits(aw->regmap, AW8697_REG_BSTCFG,
++			   AW8697_BSTCFG_PEAKCUR_MASK, AW8697_BSTCFG_PEAKCUR_3P5A);
++	regmap_write(aw->regmap, AW8697_REG_PRLVL, 0x00);
++	regmap_write(aw->regmap, AW8697_REG_PRTIME, 0x00);
++	regmap_update_bits(aw->regmap, AW8697_REG_BST_AUTO,
++			   AW8697_BST_AUTO_RAM_MASK, 0);
++	regmap_update_bits(aw->regmap, AW8697_REG_ADCTEST,
++			   AW8697_ADCTEST_VBAT_HW_COMP, AW8697_ADCTEST_VBAT_HW_COMP);
++
++	/* Preset LRA resonant frequency (f0_pre in 0.1 Hz units, e.g. 1700 = 170.0 Hz) */
++	f0_reg = 1000000000U / (aw->f0_pre * AW8697_F0_COEFF);
++	regmap_write(aw->regmap, AW8697_REG_F_PRE_H, (f0_reg >> 8) & 0xff);
++	regmap_write(aw->regmap, AW8697_REG_F_PRE_L, f0_reg & 0xff);
++
++	/* Low-pass filter & continuous closed-loop LRA parameters */
++	regmap_update_bits(aw->regmap, AW8697_REG_DATCTRL,
++			   AW8697_DATCTRL_FC_MASK | AW8697_DATCTRL_LPF_EN,
++			   AW8697_DATCTRL_FC_1000HZ | AW8697_DATCTRL_LPF_EN);
++	regmap_write(aw->regmap, AW8697_REG_CONT_CTRL,
++		     AW8697_CONT_ZC_DETEC_EN | AW8697_CONT_WAIT_1PERIOD |
++		     AW8697_CONT_BY_GO_SIGNAL | AW8697_CONT_CLOSE_PLAYBACK |
++		     AW8697_CONT_F0_DETECT_DIS | AW8697_CONT_O2C_DIS |
++		     AW8697_CONT_AUTO_BRK_EN);
++
++	regmap_write(aw->regmap, AW8697_REG_TD_H, (aw->cont_td >> 8) & 0xff);
++	regmap_write(aw->regmap, AW8697_REG_TD_L, aw->cont_td & 0xff);
++	regmap_write(aw->regmap, AW8697_REG_ZC_THRSH_H, (aw->cont_zc_thr >> 8) & 0xff);
++	regmap_write(aw->regmap, AW8697_REG_ZC_THRSH_L, aw->cont_zc_thr & 0xff);
++
++	/* Back-EMF auto-braking thresholds */
++	regmap_write(aw->regmap, AW8697_REG_BEMF_VTHH_H, 0x10);
++	regmap_write(aw->regmap, AW8697_REG_BEMF_VTHH_L, 0x08);
++	regmap_write(aw->regmap, AW8697_REG_BEMF_VTHL_H, 0x03);
++	regmap_write(aw->regmap, AW8697_REG_BEMF_VTHL_L, 0xf8);
++	regmap_update_bits(aw->regmap, AW8697_REG_BEMF_NUM,
++			   AW8697_BEMF_NUM_BRK_MASK, aw->cont_num_brk & 0x0f);
++	regmap_write(aw->regmap, AW8697_REG_TIME_NZC, 0x23);
++
++	/* Clear any pending interrupts */
++	regmap_read(aw->regmap, AW8697_REG_SYSINT, &reg);
++
++	return 0;
++}
++
++static void aw8697_play_work(struct work_struct *work)
++{
++	struct aw8697_data *aw = container_of(work, struct aw8697_data, play_work);
++	unsigned int dummy;
++	u16 mag;
++	u8 drv_lvl;
++
++	mutex_lock(&aw->lock);
++	mag = aw->magnitude;
++
++	if (!mag) {
++		if (aw->running)
++			aw8697_stop_locked(aw);
++		mutex_unlock(&aw->lock);
++		return;
++	}
++
++	drv_lvl = AW8697_DEFAULT_DRV_LVL_MIN +
++		  ((u32)mag * (aw->drv_lvl_max - AW8697_DEFAULT_DRV_LVL_MIN)) / 0xffffU;
++
++	regmap_update_bits(aw->regmap, AW8697_REG_SYSCTRL,
++			   AW8697_SYSCTRL_PLAY_MODE_MASK |
++			   AW8697_SYSCTRL_BST_MODE_MASK |
++			   AW8697_SYSCTRL_WORK_MODE_MASK,
++			   AW8697_SYSCTRL_PLAY_MODE_CONT |
++			   AW8697_SYSCTRL_BST_BYPASS |
++			   AW8697_SYSCTRL_ACTIVE);
++	regmap_read(aw->regmap, AW8697_REG_SYSINT, &dummy);
++
++	regmap_write(aw->regmap, AW8697_REG_DRV_LVL, drv_lvl);
++	regmap_write(aw->regmap, AW8697_REG_DRV_LVL_OV, aw->drv_lvl_ov);
++	regmap_update_bits(aw->regmap, AW8697_REG_GO,
++			   AW8697_GO_ENABLE, AW8697_GO_ENABLE);
++	aw->running = true;
++
++	mutex_unlock(&aw->lock);
++}
++
++static int aw8697_haptics_play(struct input_dev *dev, void *data,
++			       struct ff_effect *effect)
++{
++	struct aw8697_data *aw = input_get_drvdata(dev);
++	u32 level;
++
++	level = effect->u.rumble.strong_magnitude;
++	if (!level)
++		level = effect->u.rumble.weak_magnitude;
++
++	aw->magnitude = level;
++	schedule_work(&aw->play_work);
++	return 0;
++}
++
++static void aw8697_close(struct input_dev *dev)
++{
++	struct aw8697_data *aw = input_get_drvdata(dev);
++
++	cancel_work_sync(&aw->play_work);
++	mutex_lock(&aw->lock);
++	aw->magnitude = 0;
++	aw8697_stop_locked(aw);
++	mutex_unlock(&aw->lock);
++}
++
++static int aw8697_probe(struct i2c_client *i2c)
++{
++	struct aw8697_data *aw;
++	unsigned int chip_id = 0;
++	int ret;
++
++	aw = devm_kzalloc(&i2c->dev, sizeof(*aw), GFP_KERNEL);
++	if (!aw)
++		return -ENOMEM;
++
++	aw->dev = &i2c->dev;
++	mutex_init(&aw->lock);
++	INIT_WORK(&aw->play_work, aw8697_play_work);
++	i2c_set_clientdata(i2c, aw);
++
++	aw->f0_pre = AW8697_DEFAULT_F0_PRE;
++	aw->cont_td = AW8697_DEFAULT_CONT_TD;
++	aw->cont_zc_thr = AW8697_DEFAULT_ZC_THR;
++	aw->cont_num_brk = AW8697_DEFAULT_NUM_BRK;
++	aw->drv_lvl_max = AW8697_DEFAULT_DRV_LVL_MAX;
++	aw->drv_lvl_ov = AW8697_DEFAULT_DRV_LVL_OV;
++
++	of_property_read_u32(i2c->dev.of_node, "awinic,f0-preset", &aw->f0_pre);
++
++	aw->reset_gpio = devm_gpiod_get_optional(&i2c->dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(aw->reset_gpio))
++		return dev_err_probe(&i2c->dev, PTR_ERR(aw->reset_gpio),
++				     "Failed to get reset GPIO\n");
++
++	aw->regmap = devm_regmap_init_i2c(i2c, &aw8697_regmap_cfg);
++	if (IS_ERR(aw->regmap))
++		return PTR_ERR(aw->regmap);
++
++	aw8697_hw_reset(aw);
++
++	ret = regmap_read(aw->regmap, AW8697_REG_ID, &chip_id);
++	if (ret)
++		return dev_err_probe(&i2c->dev, ret, "Failed to read chip ID\n");
++
++	if (chip_id != AW8697_CHIP_ID)
++		return dev_err_probe(&i2c->dev, -ENODEV,
++				     "Unexpected chip ID: 0x%02x\n", chip_id);
++
++	ret = aw8697_init_chip(aw);
++	if (ret)
++		return dev_err_probe(&i2c->dev, ret, "Chip init failed\n");
++
++	aw->input_dev = devm_input_allocate_device(&i2c->dev);
++	if (!aw->input_dev)
++		return -ENOMEM;
++
++	aw->input_dev->name = "aw8697-haptics";
++	aw->input_dev->id.bustype = BUS_I2C;
++	aw->input_dev->close = aw8697_close;
++	input_set_drvdata(aw->input_dev, aw);
++	input_set_capability(aw->input_dev, EV_FF, FF_RUMBLE);
++
++	ret = input_ff_create_memless(aw->input_dev, NULL, aw8697_haptics_play);
++	if (ret)
++		return dev_err_probe(&i2c->dev, ret, "Failed to create FF device\n");
++
++	ret = input_register_device(aw->input_dev);
++	if (ret)
++		return dev_err_probe(&i2c->dev, ret, "Failed to register input device\n");
++
++	dev_info(&i2c->dev, "Awinic AW8697 LRA haptics ready (id=0x%02x, f0=%u.%u Hz)\n",
++		 chip_id, aw->f0_pre / 10, aw->f0_pre % 10);
++	return 0;
++}
++
++static void aw8697_remove(struct i2c_client *i2c)
++{
++	struct aw8697_data *aw = i2c_get_clientdata(i2c);
++
++	cancel_work_sync(&aw->play_work);
++	mutex_lock(&aw->lock);
++	aw8697_stop_locked(aw);
++	mutex_unlock(&aw->lock);
++}
++
++static const struct of_device_id aw8697_of_match[] = {
++	{ .compatible = "awinic,aw8697" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, aw8697_of_match);
++
++static const struct i2c_device_id aw8697_id[] = {
++	{ "aw8697" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, aw8697_id);
++
++static struct i2c_driver aw8697_driver = {
++	.driver = {
++		.name = "aw8697-haptics",
++		.of_match_table = aw8697_of_match,
++	},
++	.probe = aw8697_probe,
++	.remove = aw8697_remove,
++	.id_table = aw8697_id,
++};
++module_i2c_driver(aw8697_driver);
++
++MODULE_DESCRIPTION("Awinic AW8697 LRA Haptic Driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/soc/qcom/Kconfig b/drivers/soc/qcom/Kconfig
+index 535c86191..8a196819f 100644
+--- a/drivers/soc/qcom/Kconfig
++++ b/drivers/soc/qcom/Kconfig
+@@ -162,6 +162,13 @@ config QCOM_RPMH
+ 	  of hardware components aggregate requests for these resources and
+ 	  help apply the aggregated state on the resource.
+ 
++config QCOM_OPLUS_BITRA_SENSOR_SMEM
++	bool "OPLUS SMEM_SENSOR initializer for realme GT Neo 2 (bitra)"
++	depends on QCOM_SMEM && OF
++	help
++	  Populate SMEM item 130 (SMEM_SENSOR) on realme,bitra so Qualcomm SLPI
++	  firmware probes magnetometer, ambient light, and proximity sensors.
++
+ config QCOM_SMEM
+ 	tristate "Qualcomm Shared Memory Manager (SMEM)"
+ 	depends on HWSPINLOCK
+diff --git a/drivers/soc/qcom/Makefile b/drivers/soc/qcom/Makefile
+index bddd6f0a5..64a6ef2cf 100644
+--- a/drivers/soc/qcom/Makefile
++++ b/drivers/soc/qcom/Makefile
+@@ -42,3 +42,4 @@ qcom_ice-objs			+= ice.o
+ obj-$(CONFIG_QCOM_INLINE_CRYPTO_ENGINE)	+= qcom_ice.o
+ obj-$(CONFIG_QCOM_PBS) +=	qcom-pbs.o
+ obj-$(CONFIG_QCOM_UBWC_CONFIG) += ubwc_config.o
++obj-$(CONFIG_QCOM_OPLUS_BITRA_SENSOR_SMEM)	+= oplus_bitra_sensor_smem.o
+diff --git a/drivers/soc/qcom/oplus_bitra_sensor_smem.c b/drivers/soc/qcom/oplus_bitra_sensor_smem.c
+new file mode 100644
+index 000000000..493c694a5
+--- /dev/null
++++ b/drivers/soc/qcom/oplus_bitra_sensor_smem.c
+@@ -0,0 +1,226 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Populate OPLUS SMEM_SENSOR (SMEM item 130, 4768 bytes) on realme GT Neo 2
++ * (RMX3370 / bitra) so Qualcomm SLPI firmware probes all onboard SSC sensors
++ * (accelerometer, gyroscope, magnetometer, ambient light, proximity) with
++ * correct orientation matrices and calibration parameters.
++ */
++
++#include <linux/build_bug.h>
++#include <linux/init.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/soc/qcom/smem.h>
++#include <linux/string.h>
++
++#define SMEM_SENSOR		130
++#define REG_NUM			10
++#define PARAMETER_NUM		25
++#define FEATURE_NUM		10
++#define SOURCE_NUM		2
++#define ALGO_PARAMETER_NUM	15
++#define ALGO_FEATURE_NUM	5
++#define SENSORS_NUM		11
++#define SENSOR_ALGO_NUM		8
++#define DEFAULT_CONFIG		0xff
++
++enum {
++	OPLUS_ACCEL	= 0,
++	OPLUS_GYRO	= 1,
++	OPLUS_MAG	= 2,
++	OPLUS_LIGHT	= 3,
++	OPLUS_PROXIMITY	= 4,
++	OPLUS_CCT_REAR	= 7,
++};
++
++struct oplus_sensor_feature {
++	int reg[REG_NUM];
++	int parameter[PARAMETER_NUM];
++	int feature[FEATURE_NUM];
++};
++
++struct oplus_sensor_hw {
++	u8 sensor_name;
++	u8 bus_number;
++	u8 direction;
++	u8 irq_number;
++	struct oplus_sensor_feature feature;
++};
++
++struct oplus_sensor_vector {
++	int sensor_id;
++	struct oplus_sensor_hw hw[SOURCE_NUM];
++};
++
++struct oplus_sensor_algorithm {
++	int sensor_id;
++	int parameter[ALGO_PARAMETER_NUM];
++	int feature[ALGO_FEATURE_NUM];
++};
++
++struct oplus_sensor_info {
++	int magic_num;
++	struct oplus_sensor_vector s_vector[SENSORS_NUM];
++	struct oplus_sensor_algorithm a_vector[SENSOR_ALGO_NUM];
++};
++
++static int oplus_bitra_sensor_smem_probe(struct platform_device *pdev)
++{
++	static const int mag0_para[18] = {
++		0x29a0, 0x00, 0x00d1, 0x00, 0x00b6, 0x01,
++		0x011e, 0x00, 0x24ae, 0x00, 0x0137, 0x01,
++		0x0161, 0x00, 0x0055, 0x00, 0x28e4, 0x00
++	};
++	static const int mag1_para[18] = {
++		0x270e, 0x00, 0x0002, 0x00, 0x0068, 0x01,
++		0x007a, 0x00, 0x23b9, 0x00, 0x010d, 0x01,
++		0x0028, 0x00, 0x00c3, 0x00, 0x26eb, 0x00
++	};
++	static const int ps_para[23] = {
++		0x12c, 0x190, 0x2bc, 0x384, 0x1f4, 0x2bc, 0x708, 0x7d0,
++		0x000, 0x73a, 0x005, 0x190, 0x064, 0x7d0, 0x046, 0x1194,
++		0x3e8, 0xea60, 0x000, 0xfffe, 0x7d0, 0x01e, 0xbb8
++	};
++	struct oplus_sensor_info *chip;
++	struct oplus_sensor_hw *hw;
++	size_t smem_size = 0;
++	void *smem_addr;
++	int ret;
++
++	BUILD_BUG_ON(sizeof(struct oplus_sensor_info) != 4768);
++
++	{
++		u32 dtsi_no = 0;
++		if (!of_machine_is_compatible("realme,bitra") &&
++		    (of_property_read_u32(of_root, "oplus,dtsi_no", &dtsi_no) || dtsi_no != 0x5473))
++			return 0;
++	}
++
++	ret = qcom_smem_alloc(QCOM_SMEM_HOST_ANY, SMEM_SENSOR,
++			      sizeof(struct oplus_sensor_info));
++	if (ret == -EPROBE_DEFER)
++		return -EPROBE_DEFER;
++	if (ret < 0 && ret != -EEXIST) {
++		dev_warn(&pdev->dev, "qcom_smem_alloc(%d) failed: %d\n",
++			 SMEM_SENSOR, ret);
++		return 0;
++	}
++
++	smem_addr = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_SENSOR, &smem_size);
++	if (IS_ERR(smem_addr)) {
++		if (PTR_ERR(smem_addr) == -EPROBE_DEFER)
++			return -EPROBE_DEFER;
++		dev_warn(&pdev->dev, "qcom_smem_get(%d) failed: %ld\n",
++			 SMEM_SENSOR, PTR_ERR(smem_addr));
++		return 0;
++	}
++	if (smem_size < sizeof(struct oplus_sensor_info)) {
++		pr_err("oplus-sensor-smem: item %d size %zu < %zu\n",
++		       SMEM_SENSOR, smem_size, sizeof(struct oplus_sensor_info));
++		return 0;
++	}
++
++	chip = smem_addr;
++	memset(chip, 0, sizeof(*chip));
++
++	/* Accelerometer / Gyroscope (ICM4X607 / LSM6DS3_C, direction=3) */
++	chip->s_vector[OPLUS_ACCEL].sensor_id = OPLUS_ACCEL;
++	hw = &chip->s_vector[OPLUS_ACCEL].hw[0];
++	hw->sensor_name = 0x40;
++	hw->bus_number = DEFAULT_CONFIG;
++	hw->direction = 3;
++	hw->irq_number = DEFAULT_CONFIG;
++
++	hw = &chip->s_vector[OPLUS_ACCEL].hw[1];
++	hw->sensor_name = 0x04;
++	hw->bus_number = DEFAULT_CONFIG;
++	hw->direction = 3;
++	hw->irq_number = DEFAULT_CONFIG;
++
++	/* Magnetometer (AKM09918 / MMC5603, direction=5 + soft-iron matrix) */
++	chip->s_vector[OPLUS_MAG].sensor_id = OPLUS_MAG;
++	hw = &chip->s_vector[OPLUS_MAG].hw[0];
++	hw->sensor_name = 0x01;
++	hw->bus_number = DEFAULT_CONFIG;
++	hw->direction = 5;
++	hw->irq_number = DEFAULT_CONFIG;
++	memcpy(hw->feature.parameter, mag0_para, sizeof(mag0_para));
++
++	hw = &chip->s_vector[OPLUS_MAG].hw[1];
++	hw->sensor_name = 0x02;
++	hw->bus_number = DEFAULT_CONFIG;
++	hw->direction = 5;
++	hw->irq_number = DEFAULT_CONFIG;
++	memcpy(hw->feature.parameter, mag1_para, sizeof(mag1_para));
++
++	/* Ambient Light Sensor (STK3329 on SSC I2C5, irq 0x81) */
++	chip->s_vector[OPLUS_LIGHT].sensor_id = OPLUS_LIGHT;
++	hw = &chip->s_vector[OPLUS_LIGHT].hw[0];
++	hw->sensor_name = 0x10;
++	hw->bus_number = 5;
++	hw->direction = DEFAULT_CONFIG;
++	hw->irq_number = 0x81;
++	hw->feature.feature[0] = 1;    /* als-type */
++	hw->feature.feature[1] = 1;    /* is-unit-device */
++	hw->feature.feature[2] = 0;    /* is-als-dri */
++	hw->feature.feature[3] = 0x6e; /* als-factor */
++	hw->feature.feature[4] = 0;    /* is_als_initialed */
++	hw->feature.feature[5] = 0x0a; /* als_buffer_length */
++	hw->feature.feature[6] = 1057; /* normalization_value */
++	hw->feature.parameter[6] = 1001; /* gold-reset-scale */
++
++	/* Proximity Sensor (STK3329 on SSC I2C5, irq 0x81) */
++	chip->s_vector[OPLUS_PROXIMITY].sensor_id = OPLUS_PROXIMITY;
++	hw = &chip->s_vector[OPLUS_PROXIMITY].hw[0];
++	hw->sensor_name = 0x10;
++	hw->bus_number = 5;
++	hw->direction = DEFAULT_CONFIG;
++	hw->irq_number = 0x81;
++	hw->feature.feature[0] = 1; /* ps-type */
++	memcpy(hw->feature.parameter, ps_para, sizeof(ps_para));
++
++	/* Rear CCT sensor (TCS3408 on SSC I2C4) */
++	chip->s_vector[OPLUS_CCT_REAR].sensor_id = OPLUS_CCT_REAR;
++	hw = &chip->s_vector[OPLUS_CCT_REAR].hw[0];
++	hw->sensor_name = 0x01;
++	hw->bus_number = 4;
++	hw->direction = DEFAULT_CONFIG;
++	hw->irq_number = DEFAULT_CONFIG;
++
++	pr_info("oplus-sensor-smem: populated SMEM_SENSOR (%zu bytes) for realme,bitra\n",
++		sizeof(*chip));
++	return 0;
++}
++static struct platform_driver oplus_bitra_sensor_smem_driver = {
++	.probe = oplus_bitra_sensor_smem_probe,
++	.driver = {
++		.name = "oplus-bitra-sensor-smem",
++	},
++};
++
++static int __init oplus_bitra_sensor_smem_init(void)
++{
++	u32 dtsi_no = 0;
++	struct platform_device *pdev;
++	int ret;
++
++	if (!of_machine_is_compatible("realme,bitra") &&
++	    (of_property_read_u32(of_root, "oplus,dtsi_no", &dtsi_no) || dtsi_no != 0x5473))
++		return 0;
++
++	ret = platform_driver_register(&oplus_bitra_sensor_smem_driver);
++	if (ret)
++		return ret;
++
++	pdev = platform_device_register_simple("oplus-bitra-sensor-smem", -1, NULL, 0);
++	if (IS_ERR(pdev)) {
++		platform_driver_unregister(&oplus_bitra_sensor_smem_driver);
++		return PTR_ERR(pdev);
++	}
++	return 0;
++}
++device_initcall(oplus_bitra_sensor_smem_init);
++
++MODULE_DESCRIPTION("OPLUS SMEM_SENSOR initializer for realme GT Neo 2 (bitra)");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/usb/gadget/function/u_ether.c b/drivers/usb/gadget/function/u_ether.c
+index 59d85d6a8..594fabcdc 100644
+--- a/drivers/usb/gadget/function/u_ether.c
++++ b/drivers/usb/gadget/function/u_ether.c
+@@ -231,6 +231,8 @@ static void rx_complete(struct usb_ep *ep, struct usb_request *req)
+ 
+ 	/* normal completion */
+ 	case 0:
++		if (dev->port_usb && READ_ONCE(dev->port_usb->is_suspend))
++			gether_resume(dev->port_usb);
+ 		skb_put(skb, req->actual);
+ 
+ 		if (dev->unwrap) {
+@@ -1094,12 +1096,12 @@ void gether_resume(struct gether *link)
+ 	if (!dev)
+ 		return;
+ 
+-	if (netif_queue_stopped(dev->net))
+-		netif_start_queue(dev->net);
+-
+ 	spin_lock_irqsave(&dev->lock, flags);
+ 	link->is_suspend = false;
+ 	spin_unlock_irqrestore(&dev->lock, flags);
++
++	if (netif_queue_stopped(dev->net))
++		netif_wake_queue(dev->net);
+ }
+ EXPORT_SYMBOL_GPL(gether_resume);
+ 
+@@ -1175,6 +1177,7 @@ struct net_device *gether_connect(struct gether *link)
+ 
+ 		spin_lock(&dev->lock);
+ 		dev->port_usb = link;
++		link->is_suspend = false;
+ 		if (netif_running(dev->net)) {
+ 			if (link->open)
+ 				link->open(link);
+-- 
+2.43.0
+

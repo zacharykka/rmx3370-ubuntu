@@ -6,26 +6,29 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 - **[Build, Package & Flash Guide](docs/build-and-flash.md)** — Complete step-by-step instructions from upstream Linux source to cold-booting Ubuntu 24.04.5 LTS Server, Wi-Fi 6 setup, anti-swelling charge control, and recovery.
 - **[Bring-Up Pitfalls & Debugging Notes](docs/pitfalls-and-debugging.md)** — Every real RMX3370 hardware/bootloader/initramfs pitfall hit during development (with root causes, `pstore` evidence, and exact fixes).
 - **[Hardware & Milestone Status](docs/status.md)** — Live bring-up checklist and verified hardware capabilities.
-- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra12`).
+- **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra13`).
 - **[Technical Debt Tracker](docs/tech-debt.md)** — Known temporary workarounds and exit criteria.
 
-## Verified Working Hardware (`7.4.0-rc3-bitra12` + `bitra-device-support 1.1`)
+## Verified Working Hardware (`7.4.0-rc3-bitra13` + `bitra-device-support 1.2`)
 
 | Subsystem | Hardware / Driver | Status | Notes |
 |---|---|---|---|
 | SoC / CPU / CPUfreq | SM8250-AC 8x Kryo 485 (`qcom-cpufreq-hw`) | **Working** | 3 clusters (`0.30–1.80`, `0.71–2.42`, `0.84–3.19 GHz`), 25 thermal zones, zero boot-crutch cmdline flags |
 | RAM & Swap | 12 GiB LPDDR5 + `zram0` (LZ4) | **Working** | Exact 22-region RMX3370 `reserved-memory` map |
 | Storage | Samsung UFS 3.1 (`1d84000.ufshc`) | **Working** | All 6 LUNs (`sda`–`sdf`); `/dev/sda11` (`222 GiB` ext4 `LABEL=ubuntu-root`), GPT untouched |
-| USB Management Net | `a600000.usb` CDC-ECM (`usb0`) | **Working** | Static `192.168.2.15/24` + `dnsmasq` DHCP without default-route hijack; native on macOS/Linux |
+| USB Management Net | `a600000.usb` CDC-ECM (`usb0`) | **Working** | Static `192.168.2.15/24` + `dnsmasq` (`--bind-dynamic --dhcp-authoritative`), `bmAttributes=0xe0`, `u_ether` suspend/TX-queue fix, DWC3 USB2 LPM disabled, `bitra-usb-watch` auto-recovery |
 | Wi-Fi 6 | Qualcomm `QCA6390` (`ath11k_pci` over PCIe0) | **Working** | 2.4/5 GHz 802.11ax HE via `NetworkManager`; deterministic MAC udev rule; device-local firmware |
 | Battery Fuel Gauge | `TI BQ28Z610` (`bq27xxx`, `i2c16@0x55`) | **Working** | 2S pack voltage (~7.4–8.8 V), current, SOC, cycle count, temperature |
 | 2S Charger & Anti-Swelling | `MPS MP2650` (`mp2650_charger`, `i2c5@0x5c`) | **Working** | Upstream `charge_behaviour` (`auto`, `inhibit-charge` USB bypass, `force-discharge` HIZ) + 60s systemd timer (`55%–75%` band) |
-| Native OLED Display & Anti-Burn-In | Samsung `AMS662ZS01` (`panel-samsung-ams662zs01`, `1080x2400 @ 60 Hz`, DSC 1.1) | **Working** | Native DSI command-mode OLED + 12-bit DCS backlight (`0..2047`) + true DPMS power-off (`bitra-oled-blank.service` auto-blanks on headless boot) |
+| Native OLED Display & Anti-Burn-In | Samsung `AMS662ZS01` (`panel-samsung-ams662zs01`, `1080x2400 @ 60 Hz`, DSC 1.1) | **Working** | Native DSI command-mode OLED + 12-bit DCS backlight + `vreg_panel_vout` (`gpio125`) + `drm_kms_helper.fbdev_emulation=0` + delayed `DISPON` + DRM CRTC power-off (`bitra-desktop stop`); see Pitfall 40 / TD-06 for brief (~0.1 s) ABL handover flash |
 | GPU (3D / Vulkan) | Qualcomm `Adreno 650` (`msm` + `GMU` + `freedreno` / `Turnip`) | **Working** | Mesa OpenGL 4.6 / ES 3.2 (`FD650`) + Vulkan (`Turnip`); uses stock device-signed `a650_zap.mbn` + upstream `a650_sqe.fw`/`a650_gmu.bin` |
 | Touchscreen | `Synaptics S3908` (`synaptics_tcm_i2c`, `i2c13@0x4b`) | **Working** | Native TouchComm v1 I2C driver, 10-finger multitouch (`8639x19199` subpixel native) |
 | Hardware Buttons | Power (`pm8941_pwrkey`), Volume Up/Down (`pm8150` GPIO 6/7) | **Working** | All three physical side buttons report standard Linux input keycodes |
 | Bluetooth 5.2 | Qualcomm `QCA6390` (`hci_qca` over `&uart6` + `qca6390-pmu`) | **Working** | Classic (A2DP/HFP audio) + BLE 5.2 + HID/UHID; automatic deterministic public address (`bitra-bt-addr.service`) |
 | Stereo Speakers & Mics | `ADSP` (`pd-mapper`) + Dual NXP `TFA9874` (`i2c15@0x34/0x35`) + `WCD9380` (`SoundWire`) | **Working** | Native stereo speakers (`TERTIARY_MI2S_RX` `gpio137`), dual analog mics (`AMIC1`+`AMIC5`), ALSA UCM2 + PipeWire + Phosh volume OSD |
+| Linear Haptics Motor | Awinic `AW8697` 0815 X-Axis LRA (`i2c11@0x5a`, 170 Hz) | **Working** | Clean mainline `aw8697.c` force-feedback (`EV_FF` / `FF_RUMBLE`) + `FEEDBACKD_TYPE=vibra` udev rule (`feedbackd`) |
+| Onboard Sensors (6/6) | Qualcomm `SLPI` + `SMEM_SENSOR` + `hexagonrpcd` + `libssc` + `iio-sensor-proxy` | **Working** | Accelerometer & Gyroscope (`icm4x6xa`), Magnetometer & Compass (`ak0991x`/`mmc5603`), Ambient Light & Proximity (`stk3329`); live `monitor-sensor` + Phosh auto-rotation/auto-brightness |
+| Type-C Video Out (DP Alt-Mode) | USB-C receptacle (USB 2.0-only hardware wiring) | **Hardware Unsupported** | RMX3370 physically wires USB 2.0 lines only (no SuperSpeed TX/RX lanes; `fsa4480` is analog audio only); use VNC/RDP/WayVNC or USB DisplayLink instead |
 | Optional Touch Desktop | `Phosh` + `phoc` Wayland (`bitra-desktop`) | **Working (Optional)** | Headless `multi-user.target` by default; start/stop on demand via `sudo bitra-desktop start` / `stop` |
 | Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, Docker (`overlayfs`, `cgroup2fs`, `iptables-nft` NAT/bridge), AppArmor, `wireguard`, `nf_tables` |
 | USB Host / OTG | `pm8150b_typec` + `usb_1_dwc3` OTG + MP2650 5V boost | **Working** | Dual-role Type-C + 5V/1.25A OTG boost; verified with external USB hard drive |
