@@ -1503,7 +1503,7 @@ WPEOF
 # 13a-udev. udev rule so iio-sensor-proxy enables all Qualcomm SSC sensors on /dev/fastrpc-sdsp
 mkdir -p "$STAGE/etc/udev/rules.d"
 cat > "$STAGE/etc/udev/rules.d/81-bitra-ssc-sensors.rules" << 'UDEVEOF'
-SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp*", ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-accel ssc-light ssc-proximity ssc-compass"
+SUBSYSTEM=="misc", KERNEL=="fastrpc-sdsp*", ENV{IIO_SENSOR_PROXY_TYPE}+="ssc-accel ssc-light ssc-proximity ssc-compass", ENV{ACCEL_MOUNT_MATRIX}="-1, 0, 0; 0, -1, 0; 0, 0, 1"
 SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="aw8697-haptics", TAG+="uaccess", ENV{FEEDBACKD_TYPE}="vibra"
 UDEVEOF
 

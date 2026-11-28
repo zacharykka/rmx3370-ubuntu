@@ -9,7 +9,7 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 - **[Kernel ABI Ledger](docs/kernel-abi.md)** — Packaged kernel release history (`-bitra1` .. `-bitra14`).
 - **[Technical Debt Tracker](docs/tech-debt.md)** — Known temporary workarounds and exit criteria.
 
-## Verified Working Hardware (`7.4.0-rc3-bitra14` + `bitra-device-support 1.3`)
+## Verified Working Hardware (`7.4.0-rc3-bitra14` + `bitra-device-support 1.4`)
 
 | Subsystem | Hardware / Driver | Status | Notes |
 |---|---|---|---|
@@ -29,7 +29,7 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 | Linear Haptics Motor | Awinic `AW8697` 0815 X-Axis LRA (`i2c11@0x5a`, 170 Hz) | **Working** | Clean mainline `aw8697.c` force-feedback (`EV_FF` / `FF_RUMBLE`) + `FEEDBACKD_TYPE=vibra` udev rule (`feedbackd`) |
 | Onboard Sensors (6/6) | Qualcomm `SLPI` + `SMEM_SENSOR` + `hexagonrpcd` + `libssc` + `iio-sensor-proxy` | **Working** | Accelerometer & Gyroscope (`icm4x6xa`), Magnetometer & Compass (`ak0991x`/`mmc5603`), Ambient Light & Proximity (`stk3329`); live `monitor-sensor` + Phosh auto-rotation/auto-brightness |
 | Hardware Video Codec | Qualcomm `Venus` VPU (`qcom-venus`, `/dev/video0` + `/dev/video1`) | **Working** | 1080p H.264/HEVC & 720p VP9/VP8 HW decode (`7.5x–22.5x` realtime) + 1080p H.264/HEVC HW encode (`7.3x–9.6x`) via GStreamer & `ffmpeg`; squashed stock `venus.mbn` (`VIDEO.VPU.1.0-00096-PROD-2`) |
-| Offline Hardware RTC | PM8150 `rtc0` + `bitra-rtc-sync` (`bitra-device-support 1.3`) | **Working** | Android `time_daemon`-style delta-offset persistence restores `<1 s` accurate wall-clock time before `chronyd` starts even offline |
+| Offline Hardware RTC | PM8150 `rtc0` + `bitra-rtc-sync` (`bitra-device-support 1.4`) | **Working** | Android `time_daemon`-style delta-offset persistence restores `<1 s` accurate wall-clock time before `chronyd` starts even offline |
 | Type-C Video Out (DP Alt-Mode) | USB-C receptacle (USB 2.0-only hardware wiring) | **Hardware Unsupported** | RMX3370 physically wires USB 2.0 lines only (no SuperSpeed TX/RX lanes; `fsa4480` is analog audio only); use VNC/RDP/WayVNC or USB DisplayLink instead |
 | Optional Touch Desktop | `Phosh` + `phoc` Wayland (`bitra-desktop`) | **Working (Optional)** | Headless `multi-user.target` by default; start/stop on demand via `sudo bitra-desktop start` / `stop` |
 | Ubuntu Server Stack | Ubuntu 24.04.5 LTS ARM64 | **Working** | `systemd running` (0 failed units), key-only SSH, Docker (`overlayfs`, `cgroup2fs`, `iptables-nft` NAT/bridge), AppArmor, `wireguard`, `nf_tables` |
@@ -54,7 +54,7 @@ Clean, reproducible mainline Linux (`7.4.0-rc3`) and **Ubuntu 24.04.5 LTS Server
 
 > **Pre-Extracted Generic Stock Firmware & Pre-Built `.deb` Packages (GitHub Releases)**:
 > - **[`firmware-rmx3370-stock`](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/firmware-rmx3370-stock)** (`rmx3370-stock-firmware-generic.tar.zst`): Model-generic stock firmware for QCA6390 Wi-Fi 6 + Bluetooth 5.2, SDX55M 5G modem (`sdx55m/*`, `modem_pr/*`), Adreno 650 GPU, ADSP audio DSP, SLPI sensor DSP + configs, and squashed Qualcomm Venus `venus.mbn`. **Device-unique EFS partitions (`mdm1m9kefs1/2/3`, `mdmddr`) and `/persist/sensors` calibration are STRICTLY EXCLUDED — extract them read-only from your own phone.**
-> - **[`debs-7.4.0-rc3-bitra14`](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/debs-7.4.0-rc3-bitra14)**: Ready-to-install ARM64 `.deb` packages for `linux-image-7.4.0-rc3-bitra14`, `bitra-device-support 1.3`, `hexagonrpc`, `libssc`, and SSC-enabled `iio-sensor-proxy 3.9`.
+> - **[`debs-7.4.0-rc3-bitra14`](https://github.com/zacharykka/rmx3370-ubuntu/releases/tag/debs-7.4.0-rc3-bitra14)**: Ready-to-install ARM64 `.deb` packages for `linux-image-7.4.0-rc3-bitra14`, `bitra-device-support 1.4`, `hexagonrpc`, `libssc`, and SSC-enabled `iio-sensor-proxy 3.9`.
 
 > **One-Command On-Device Modem Extraction**: Once Ubuntu is running on the phone, **`sudo bitra-extract-sdx55-fw`** automatically mounts the `modem` partition **read-only** and safely extracts **`sdx55m/`**, **`modem_pr/`**, and the read-only **`mdm1m9kefs{1,2,3}` + `mdmddr`** snapshots (runtime EFS syncs write only to `/var/lib/bitra/sdx55m-efs-rw/` and never touch raw UFS).
 
